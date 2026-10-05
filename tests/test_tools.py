@@ -12,6 +12,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -620,9 +621,15 @@ def test_dupdiff(tmp, mod, out, rep):
 
 def test_external_tools(tmp, mod, out, rep):
     import nwn_dashboard
-    clean = nwn_dashboard.clean_tools([{"name": "Aurora Hak Explorer", "path": "C:/x.exe", "exts": ["hak", ".erf", "bad ext!"]},
+    clean = nwn_dashboard.clean_tools([{"name": "Hak viewer", "path": "C:/x.exe", "exts": ["hak", ".erf", "bad ext!"]},
                                        {"name": "", "path": "C:/y.exe"}, "junk"])
-    check("tools: settings keep only well-formed tools", clean == [{"name": "Aurora Hak Explorer", "path": "C:/x.exe", "exts": ["hak", "erf"]}], clean)
+    check("tools: settings keep only well-formed tools", clean == [{"name": "Hak viewer", "path": "C:/x.exe", "exts": ["hak", "erf"]}], clean)
+    # owner's rule (2026-10-05): no dependence on, or ready-made entries for, any particular third-party tool - the
+    # user adds their own. The page, manual and install guide name none.
+    named = [f for f in ("dashboard.html", "docs/MANUAL.md", "INSTALL.md")
+             if re.search(r"Aurora (Hak|TLK)|NWN Explorer|TOOL_PRESETS|data-preset",
+                          open(os.path.join(ROOT, f), encoding="utf-8").read())]
+    check("tools: no particular third-party tool is named or preset - users add their own", named == [], named)
     try:
         nwn_dashboard.open_in_tool("Not configured", mod); bad = False
     except ValueError:

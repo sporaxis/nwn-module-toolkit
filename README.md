@@ -1,4 +1,4 @@
-# NWN Module Toolkit 1.5.0
+# NWN Module Toolkit 1.5.1
 
 Analyse, understand and clean up Neverwinter Nights: Enhanced Edition modules - safely.
 
@@ -11,6 +11,21 @@ Analyse, understand and clean up Neverwinter Nights: Enhanced Edition modules - 
 - **Play-test**: a log monitor that explains each game/server error and links it to the script behind it.
 
 Runs on Windows, macOS and Linux.
+
+## Why I made this
+By day I work in cyber security risk. In my own time I tinker with Neverwinter Nights, and I'm part of the community behind Mystara: Black Horizon, a large persistent world where I look after the server, keeping it up and keeping it secure.
+
+NWN time is hard to find around work, family and sport, so I don't build this in big sessions. I fit it in here and there. But I'm still very much invested in the game and the people who play it.
+
+Running a server that has grown for years, I kept hitting the same problem. The module holds thousands of scripts, duplicate items, and haks that players have to download and that are bigger than they need to be. Nobody can say for sure what's still in use. The toolset can't answer "what uses this?" across a whole module and its haks, and deleting the wrong thing can break a live server.
+
+So I built the toolkit the way I'd run a security assessment:
+
+- Read everything, never touch the original.
+- Back every finding with evidence: the file, field or script line it came from.
+- Treat every clean-up as a controlled change: plan it, build a new copy, and audit that copy against the original before anyone uses it.
+
+I leveraged AI to help me rapidly build and develop the toolkit - it's how a project like this fits into the time I have.
 
 **Your originals are only read, except by five buttons you press yourself.** Everything else the toolkit writes goes
 into its own `nwn_workspace` folder. The five exceptions: **Add to game folders** (Build & audit, after typing ADD)
@@ -46,6 +61,11 @@ The full manual is in the dashboard (**Help**) and in `docs/MANUAL.md`.
 `python tests/run_all.py` (macOS / Linux: `python3 tests/run_all.py`) runs every test suite and prints one table; its
 last line must say that all suites passed. Each suite can also be run on its own (for example
 `python tests/test_quests.py`) and ends with "N/M checks passed".
+
+## Credits
+Created by **Sporaxis** - contact: sporaxis@gmail.com.
+The code was developed within Claude, Anthropic's AI assistant. The toolkit itself uses no AI: it runs entirely on
+your computer and makes no internet connections.
 
 ## Licence
 MIT - see `LICENSE`. The neverwinter.nim programs described in `tools/README.txt` are separate (MIT licence) and not

@@ -44,6 +44,8 @@ From now on, start the toolkit with **Start NWN Toolkit** in the install folder 
 
 ## Step 4 - Tell it where the game is
 
+If you brought your work across from an older copy, this is already done - skip to step 5.
+
 In the dashboard, on the **Modules** page, open **Settings**:
 1. **NWN install folder** - press **Detect**. It finds the usual Steam and Beamdog installs. If it finds nothing, type
    the folder that contains the `data` and `lang` folders, for example
@@ -66,12 +68,21 @@ Without it everything else still works.
    - Mac with Apple silicon (M1 and later): `neverwinter-aarch64-macos.zip`; older Intel Mac: `neverwinter-x86_64-macos.zip`
    - Linux: `neverwinter-x86_64-linux-gnu.zip`
 3. Open the zip and copy `nwn_script_comp` (on Windows `nwn_script_comp.exe` **and the .dll files next to it**) into
-   this toolkit's `tools` folder. `nwn_asm` and `nwn_erf` are useful too - copy them as well.
+   the `tools` folder of the installed toolkit: `NWN Module Toolkit\toolkit\tools` in your user folder (macOS:
+   `~/NWN Module Toolkit/toolkit/tools`; or the
+   `tools` folder of an unzipped copy you run without installing). Updates keep it there. `nwn_asm` and `nwn_erf` are useful too - copy them as well.
 4. macOS and Linux only: open Terminal in the `tools` folder and run
    `chmod +x nwn_script_comp nwn_asm nwn_erf`, and on macOS also
    `xattr -d com.apple.quarantine nwn_script_comp nwn_asm nwn_erf`.
 
 The Modules page then says the compiler was **found**. More detail: `tools/README.txt`.
+
+## Step 6 (optional) - add the tools you already use
+
+The toolkit needs no other program, and it names none. If you use a hak or 2da editor, an image viewer or a text
+editor, add it under **Settings → External tools → + Add a tool**: a name, the program (on Windows the `.exe`, on
+macOS the `.app`) and the file types it opens. The dashboard then shows **Open in …** buttons for those files. It only
+ever starts programs you added, with the file as the argument.
 
 ## Updating to a new version
 

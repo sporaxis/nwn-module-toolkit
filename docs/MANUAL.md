@@ -134,8 +134,9 @@ older version's Build page says so instead of building without them, and refuses
 - **Compiler path** (optional): leave it empty when the compiler is in the toolkit's `tools` folder (see 2.2). The
   line above the boxes says whether it was found.
 - **Log folders**: where the Log monitor looks. The label shows the folders it uses when you leave this empty.
-- **External tools** (optional): programs you already use, such as Aurora Hak Explorer, Aurora TLK Explorer or the
-  toolset, with the file types each one opens. The dashboard then shows **Open in …** buttons on the Overview (the
+- **External tools** (optional): add any program you already use - a hak or 2da editor, an image viewer, a text
+  editor - with **+ Add a tool**: a name, the program and the file types it opens (leave them empty to offer it for
+  every file). The toolkit needs none of them and names no particular tool. The dashboard then shows **Open in …** buttons on the Overview (the
   module), the Hak catalogue and the Hak editor. On Windows a tool must be an `.exe`; on macOS it can be an
   application (`/Applications/Tool.app`). The dashboard only starts programs you listed, with the file as the
   argument, never through a command shell.
@@ -459,8 +460,8 @@ holds them), who carries, sells or creates it, quest links and duplicates. The i
 simple items use `i<class>_<nnn>.tga`, three-part weapons stack their bottom/middle/top pictures, and armour shows its
 default icon (the game assembles armour from body parts). Pictures are found in the haks, the module, the override
 folder and the base game, in the game's order, so set the NWN install folder in Settings. Hover an icon for the picture
-names; DDS-only pictures show "dds". For a 3D view, open the hak in a tool such as Aurora Hak Explorer (see *External
-tools* in 2.1).
+names; DDS-only pictures show "dds". For a 3D view, open the hak in a model viewer you added under *External tools*
+(2.1).
 
 *Placed objects whose blueprint is not in the module* is grouped by area, then by holder, with a search, a kind filter
 and **Missing only**, which hides normal copies of base-game items and creatures.

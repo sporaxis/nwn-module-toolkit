@@ -631,9 +631,9 @@ VIEWS.home = async (m) => {
     <label class="small">NWN install folder (the one with the data and lang folders)<span class="row" style="flex-wrap:nowrap"><input type="text" class="wide grow" id="s_root" value="${esc(st.settings.nwn_root)}" placeholder="${st.default_nwn_root ? `found ${esc(st.default_nwn_root)} - press Detect to use it` : "e.g. C:\\Program Files (x86)\\Steam\\steamapps\\common\\Neverwinter Nights or ~/Library/Application Support/Steam/steamapps/common/Neverwinter Nights"}"><button class="btn" id="s_detect" type="button" title="Look in the usual Steam, GOG and Beamdog places">Detect</button></span></label>
     <label class="small">NWN user folder (Documents/Neverwinter Nights)<input type="text" class="wide" id="s_user" value="${esc(st.settings.nwn_user)}" placeholder="e.g. C:\\Users\\you\\Documents\\Neverwinter Nights or ~/Documents/Neverwinter Nights"></label>
     <label class="small">Log folders (comma separated) - default ${esc(st.default_logs.join(", ")||"not detected")}<input type="text" class="wide" id="s_logs" value="${esc((st.settings.log_paths||[]).join(", "))}"></label></div>
-    <details class="small" style="margin-top:8px"><summary><b>External tools</b> - programs you already use (e.g. Aurora Hak Explorer), opened from the dashboard with the right file</summary>
+    <details class="small" style="margin-top:8px"><summary><b>External tools</b> - add any program you already use (a hak or 2da editor, an image viewer, a text editor...), opened from the dashboard with the right file</summary>
       <p class="muted">The dashboard only starts programs listed here, with the file as its argument (no command shell). Leave the file types empty to offer the tool for every file.</p>
-      <div id="xtools"></div><div class="row"><button class="btn small" id="xtAdd">+ Add a tool</button>${TOOL_PRESETS.map(p => `<button class="btn small" data-preset="${esc(p.name)}">+ ${esc(p.name)}</button>`).join("")}</div></details>
+      <div id="xtools"></div><div class="row"><button class="btn small" id="xtAdd">+ Add a tool</button></div></details>
     <div class="row" style="margin-top:8px"><button class="btn" id="saveS">Save settings</button><div class="small grow" id="sMsg"></div></div>
     <p class="small muted">Workspace (analyses and builds are stored here): <span class="mono">${esc(st.workspace)}</span></p>
     <div class="row small"><button class="btn small" id="bring" title="Copy your settings, analyses, edits, builds and compiler from another copy of the toolkit (an older version) into this one. The other copy is not changed.">Bring work from another copy…</button><span class="muted">for updating: copies everything from an older version's folder into this one</span></div></div>`;
@@ -653,7 +653,6 @@ VIEWS.home = async (m) => {
     m.querySelectorAll("[data-xdel]").forEach(b => b.onclick = () => { XT.splice(+b.dataset.xdel, 1); drawXT(); }); };
   drawXT();
   $("#xtAdd", m).onclick = () => { XT.push({name: "", path: "", exts: []}); drawXT(); };
-  m.querySelectorAll("[data-preset]").forEach(b => b.onclick = () => { const p = TOOL_PRESETS.find(x => x.name === b.dataset.preset); XT.push({name: p.name, path: "", exts: p.exts.slice()}); drawXT(); });
   // Save settings: the server answers with what it saved and, in warnings, anything that looks wrong (a folder that
   // is not an NWN install, a tool it could not keep) - shown next to "Saved."
   $("#saveS", m).onclick = async () => { const msg = $("#sMsg", m); msg.textContent = "Saving…";
@@ -1141,7 +1140,8 @@ async function fillIcons(host){
   slots.forEach(x => { x.innerHTML = iconHtml(S.icons[x.dataset.icon], x.classList.contains("big")); });
 }
 
-// external tools (Settings): "Open in Aurora Hak Explorer" etc.
+// external tools (Settings): "Open in <your tool>" for each program you added whose file types fit. The toolkit names
+// and needs no particular tool: you add the ones you use.
 function openInButtons(path){
   if (STATIC || !path) return "";
   const ext = (String(path).split(".").pop() || "").toLowerCase();
@@ -1152,9 +1152,6 @@ function openInButtons(path){
 document.addEventListener("click", async e => { const b = e.target.closest("[data-openin]"); if (!b) return; e.preventDefault();
   try { await post("/api/tools/open", {tool: b.dataset.openin, file: b.dataset.file}); b.textContent = "Opened"; setTimeout(() => b.textContent = "Open in " + b.dataset.openin, 2500); }
   catch(err){ errorBox(err.message); } });
-// Ready-made entries for Settings > External tools (the user still fills in the program path).
-const TOOL_PRESETS = [{name: "Aurora Hak Explorer", exts: ["hak","erf","mod","nwm","sav","bif","key"]},
-  {name: "Aurora TLK Explorer", exts: ["tlk","2da","itp"]}, {name: "NWN Toolset", exts: ["mod"]}];
 // errorBox: a message with one button (text is escaped); used for errors.
 function errorBox(text){ dialog({title: "Not done", html: esc(text), cancel: null}); }
 
