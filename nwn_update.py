@@ -80,6 +80,9 @@ WORK_FILE = "toolkit.json"          # <analysis>/toolkit.json: {"work_format", "
 REANALYSE = [
     dict(key="asset_duplicates", since="1.4.0",
          what="Models and textures with the same content under different names (Duplicates page)"),
+    # merge_rules 2: a blueprint's entry in the custom palette (.itp) no longer holds back merging identical copies
+    dict(key="merge_rules", since="1.5.2",
+         what="Identical blueprints listed in your custom palette can be merged (Duplicates page)"),
 ]
 
 # --- (a) bringing work across -------------------------------------------------------------------------------

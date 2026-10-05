@@ -128,6 +128,7 @@ import nwn_compile
 import nwn_edit
 import nwn_hakedit
 import nwn_logs
+import nwn_nasher
 import nwn_palette
 import nwn_sheets
 import nwn_setup
@@ -1297,7 +1298,9 @@ def list_analyses():
                 summ = json.loads(m.group(1) + "}") if m else {}
             except Exception:  # noqa
                 summ = {}
+            # module_source: a nasher project's folder (module_path is then the converted copy it indexed)
             out.append(dict(name=nm, module_name=summ.get("module_name", nm), module_path=summ.get("module_path"),
+                            module_source=summ.get("module_source"),
                             indexed_at=summ.get("indexed_at"),
                             has_build=os.path.isfile(os.path.join(WORKSPACE, nm, "build", "audit.json"))))
     return out
@@ -1454,7 +1457,9 @@ def analysis_name_for(module, name=None):
     if os.path.isfile(os.path.join(d, "index.sqlite")):
         try:
             db = n.sqlite_ro(os.path.join(d, "index.sqlite"))      # read-only: only compares the stored path
-            prev = db.execute("SELECT value FROM meta WHERE key='module_path'").fetchone()
+            # a nasher project's analysis indexed a converted copy: module_source is the project folder chosen
+            prev = (db.execute("SELECT value FROM meta WHERE key='module_source'").fetchone() or
+                    db.execute("SELECT value FROM meta WHERE key='module_path'").fetchone())
             db.close()
             if prev and os.path.abspath(prev[0]).lower() != os.path.abspath(module).lower():
                 return f"{base}_{tag}"
@@ -1896,7 +1901,8 @@ def list_dir(path):
                 mods.append(e.name)
     except OSError as ex:
         return dict(path=path, parent=os.path.dirname(path), dirs=[], mods=[], error=str(ex))
-    looks_like_module = os.path.isfile(os.path.join(path, "module.ifo"))
+    # an unpacked module folder, or a nasher project (module.ifo.json inside: converted when analysed)
+    looks_like_module = os.path.isfile(os.path.join(path, "module.ifo")) or nwn_nasher.is_project(path)
     return dict(path=path, parent=os.path.dirname(path) if os.path.dirname(path) != path else "", dirs=dirs,
                 mods=mods, is_module=looks_like_module)
 
@@ -2174,7 +2180,8 @@ def api_reanalyse(b):
         meta = dict(db.execute("SELECT key, value FROM meta").fetchall())
     finally:
         db.close()
-    module = meta.get("module_path") or ""
+    # a nasher project is converted afresh from the project folder (module_source), not re-read from the old copy
+    module = meta.get("module_source") or meta.get("module_path") or ""
     if not module or not os.path.exists(module):
         raise ValueError(f"the module this analysis was made from is not there any more ({module or 'unknown'}) - "
                          "analyse it from the Modules page")
@@ -2576,6 +2583,28 @@ def api_build(b):
     return dict(job=run_job("build", job_build(a, field(b, "plan", dict), safe_name(name) if name else None), key=a))
 
 
+def api_build_nasher(b):
+    """Build & audit page "Save as nasher project": the last build's clean module written as a nasher project
+    (nwn_nasher.export) beside it, in <analysis>/build/<build name>_nasher - inside the workspace only."""
+    a = field(b, "a")
+    d = os.path.join(analysis_dir(a), "build")
+    ch = _json_file(os.path.join(d, "changes.json"), None) or {}
+    src = ch.get("output") or ""
+    inside = os.path.normcase(os.path.abspath(src)).startswith(os.path.normcase(os.path.abspath(d)) + os.sep)
+    if not src or not inside or not os.path.isdir(src):
+        raise ValueError("there is no finished build in this analysis to save - run Build & audit first")
+    dest = os.path.join(d, nwn_nasher.EXPORT_NAME.format(os.path.basename(src)))
+
+    def job_fn(job):
+        print(f"Writing {src} as a nasher project ...")
+        r = nwn_nasher.export(src, dest, stop=lambda: job.stop_requested)
+        for e in r["errors"]:
+            print("  " + e)
+        print(f"done: {r['json']} JSON file(s) and {r['files']} other file(s) in {r['dest']}")
+        return r
+    return dict(job=run_job("nasher", job_fn, key=a), dest=dest)
+
+
 def api_archive(b, unpack=False):
     """Modules page: Archive (zip the analysis data to save space) or, with unpack, Unpack it again, as a job.
     While it runs the name is in ARCHIVING, so analysis_dir refuses it and nothing opens its index meanwhile."""
@@ -2845,6 +2874,7 @@ POST_ROUTES = {
     "/api/analysis/clear": lambda b: clear_analysis(field(b, "a", str, "")),
     "/api/analysis/delete": api_analysis_delete,
     "/api/build": api_build,
+    "/api/build/nasher": api_build_nasher,
     "/api/palette/move": api_palette_move,              # Blueprints page: move to another palette category (next build)
     "/api/palette/move/undo": api_palette_move_undo,    # cancel waiting palette moves
     "/api/bpchange/plan": api_bpchange_plan,            # Change fields… preview (nothing stored)

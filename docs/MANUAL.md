@@ -186,8 +186,17 @@ you pay for the full run and still get "Review" everywhere.
 
 ### 4.1 Choosing a module
 Type or paste the path, or use **Browse…**. You can point it at:
-- an **unpacked module folder** (the one containing `module.ifo`, for example a toolset `temp0` folder or a nasher `src` folder), or
+- an **unpacked module folder** (the one containing `module.ifo`, for example a toolset `temp0` folder), or
+- a **nasher project** (the folder with `nasher.cfg` or `src/`, where each resource is kept as JSON text such as
+  `src/uti/sword.uti.json`), or
 - a **`.mod`** file.
+
+**nasher projects.** The toolkit converts the JSON files into an ordinary module folder inside the analysis folder
+(`module_from_json/`) and analyses that copy: each `<name>.<ext>.json` becomes the binary file, `.nss`, `.2da` and
+other game files are copied, and everything else (`nasher.cfg`, READMEs) is left out. Your project is only read. The
+Overview names the project; **Analyse again** converts it afresh, so changes you made since show up. A build gives a
+normal module folder and `.mod`, as `nasher pack` would. A JSON file that can't be read, or the same name in two
+folders, is listed under Issues with how to fix it. The converted copy takes about as much disk space as the module.
 
 Under **Optional** you can add hak files by hand (one per line), a talk table and an analysis name. Usually you
 need none of these: haks and the custom talk table are found from `module.ifo` and your NWN folders.
@@ -554,7 +563,11 @@ folder). Like a clean build, it counts the module and its haks only, not your ow
 ### 5.5 Duplicates
 Identical blueprints, scripts, conversations and assets; items with the same stats; shared tags; same names. A
 **keeper** is suggested: the in-use, compiled, most-referenced copy. Groups marked *mergeable* can be merged by the
-build. The others need a human decision.
+build. The others need a human decision, and the box under the group says why. Each member is its own file: the
+**File (resref)** column shows its name, so "Iron Sword [sword_a.uti]" and "Iron Sword [sword_b.uti]" are two files
+that make the same sword. A blueprint's entry in the custom palette never stops a merge: the build removes the
+merged-away copy's palette entry, logs it, and the audit checks it (analyses made before 1.5.2 still show such groups
+as a manual decision until you press **Analyse again**).
 
 **Models and textures with the same content (module and haks)**, below the groups: model and texture files that are the
 same under different names, found in the module and every hak - for example a head copied to a new head number. Textures
@@ -1010,6 +1023,13 @@ into your game folders never replaces an original:
 - `changes.md` and the result card list the old → new names. Copy the files in `build/haks` into your hak folder next
   to the originals, and the clean `.mod` into your modules folder - or let **Add to game folders** do it.
 
+**Save as nasher project.** Below Add to game folders: writes the last build as a nasher project in
+`build/<name>_clean_nasher/` - each resource as `src/<type>/<name>.<type>.json` (the JSON nasher and nwn_gff use;
+converting it back gives the same bytes), scripts, tables and other files as `src/<type>/<name>.<type>`, and a
+starter `nasher.cfg` (one layout rule, `"*" = "src/$ext"` - check it against your nasher version and your own rules).
+Copy it into your repository or compare it with your nasher source. Saving again replaces that folder. Nothing outside
+the analysis folder is written. Command line: `python nwn_nasher.py export "<module folder or .mod>" "<new folder>"`.
+
 **Add to game folders.** After a build, the result card has an **Add to game folders…** button. It needs your NWN
 user folder in Settings (the one with the `modules` and `hak` folders). It first shows what would be copied where -
 the clean `.mod` into `modules`, each **rebuilt** hak from `build/haks` into `hak`, with sizes. Haks the build left as
@@ -1114,6 +1134,8 @@ python nwn_housekeep.py "<modules folder>"                  list what could be a
 python nwn_archive.py archive|unpack nwn_workspace/<name>   zip / unzip an analysis
 python nwn_diff.py <older> <newer> [--analysis <name>]      compare two copies; --snapshot <module> saves a snapshot
 python nwn_facts.py <name> <question> ...                   read-only facts (see 10)
+python nwn_nasher.py export "<module>" "<new folder>"        a module folder or .mod written as a nasher project
+python nwn_nasher.py convert "<nasher project>" "<new folder>"  a nasher project written as a module folder
 ```
 - `--export` writes `nwn_workspace/<name>_report.html`, a single file you can open in any browser.
 - `--no-json` skips writing a JSON copy of every GFF file. It is faster and much smaller, and the dashboard does not

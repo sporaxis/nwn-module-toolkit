@@ -1271,6 +1271,31 @@ def quickscan_event_names(tmp):
           set(page.items()) ^ set(nwn_quickscan.MOD_EVENTS.items()))
 
 
+def quickscan_event_sources(tmp):
+    """A module event script that the base game or a hak supplies (x2_mod_def_act is the game's default OnActivateItem)
+    gets no note; one found nowhere is a warning, and an error once the game install was read. A tester saw
+    x2_mod_def_act flagged although it is a valid base-game script."""
+    import nwn_quickscan
+    m3 = os.path.join(tmp, "qs_src"); os.makedirs(m3)
+    hk = os.path.join(tmp, "qs_src_hak"); os.makedirs(hk)
+    w(hk, "ev_from_hak.ncs", b"NCS V1.0")
+    h.pack_hak(hk, os.path.join(tmp, "qs_src.hak"))
+    w(m3, "module.ifo", n.write_gff(root("IFO ", Mod_Name=loc("Src"), Mod_OnActvtItem=(R, "x2_mod_def_act"),
+                                          Mod_OnModLoad=(R, "ev_from_hak"), Mod_OnHeartbeat=(R, "zz_nowhere"))))
+
+    def notes(**kw):
+        r = nwn_quickscan.scan(m3, haks=[os.path.join(tmp, "qs_src.hak")], **kw)
+        return {x["text"].split("'")[1]: x["level"] for x in r["warnings"] if x["text"].startswith("module event")}
+    got = notes()
+    check("quickscan: no install folder - a base-game name and a hak's script get no note; one found nowhere is a warning",
+          got == {"zz_nowhere": "warning"}, got)
+    game = os.path.join(tmp, "qs_game")
+    h.fake_nwn_root(game, ["x2_mod_def_act.ncs", "nw_c2_default1.ncs"])
+    got = notes(nwn_root=game)
+    check("quickscan: with the game install read, x2_mod_def_act is the base game's; one found nowhere is an error",
+          got == {"zz_nowhere": "error"}, got)
+
+
 def neutral_names():
     """Examples and test labels use neutral names (gen_c_*, no personal names)."""
     import re
@@ -1567,7 +1592,7 @@ def main():
             db.close()
         h.run(questsets_trailing_digits)
         for fn in (logs_without_index, run_lock_release, housekeep_cache_and_relative_undo, quickscan_previous_analysis,
-                   quickscan_event_names, compile_log_and_leftovers, compile_skips_links, archive_resume):
+                   quickscan_event_names, quickscan_event_sources, compile_log_and_leftovers, compile_skips_links, archive_resume):
             own = os.path.join(tmp, fn.__name__)          # each group its own folder: no name can clash
             os.makedirs(own)
             h.run(fn, own, fout) if fn is archive_resume else h.run(fn, own)

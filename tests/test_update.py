@@ -78,9 +78,9 @@ def versions():
         check("version: no VERSION.txt is a development copy", U.version_label(os.path.join(t, "x")) == "development copy")
     check("version: numbers compare as numbers", U.version_tuple("vault 1.10.0") > U.version_tuple("1.9.2") and
           U.version_tuple("development copy") is None)
-    check("re-analysis: a report without the 1.4.0 check lists it; a current one lists nothing",
-          [f["key"] for f in U.missing_features({"summary": {}})] == ["asset_duplicates"] and
-          U.missing_features({"asset_duplicates": []}) == [])
+    check("re-analysis: a report without the 1.4.0 and 1.5.2 checks lists them; a current one lists nothing",
+          [f["key"] for f in U.missing_features({"summary": {}})] == ["asset_duplicates", "merge_rules"] and
+          U.missing_features({"asset_duplicates": [], "merge_rules": 2}) == [])
 
 
 def work_guard(out):
@@ -239,7 +239,7 @@ def dashboard(out):
     rep = json.load(open(os.path.join(dst, "report.json"), encoding="utf-8"))
     check("stamp: a new analysis records the version that made it",
           rep.get("toolkit") == dict(version=U.version_label(), work_format=U.WORK_FORMAT), rep.get("toolkit"))
-    del rep["toolkit"], rep["asset_duplicates"]
+    del rep["toolkit"], rep["asset_duplicates"], rep["merge_rules"]
     write(os.path.join(dst, "report.json"), json.dumps(rep))           # as an older version left it
     r = D.POST_ROUTES["/api/reanalyse"]({"a": name})
     t0 = time.time()
@@ -248,7 +248,7 @@ def dashboard(out):
     j = D.JOBS[r["job"]]
     rep = json.load(open(os.path.join(dst, "report.json"), encoding="utf-8"))
     check("analyse again: the same module into the same folder; the new checks and the stamp are back",
-          j.status == "done" and "asset_duplicates" in rep and rep.get("toolkit", {}).get("work_format") == U.WORK_FORMAT,
+          j.status == "done" and "asset_duplicates" in rep and rep.get("merge_rules") == 2 and rep.get("toolkit", {}).get("work_format") == U.WORK_FORMAT,
           lambda: (j.status, j.lines[-5:]))
     check("analyse again: waiting changes stay", nwn_palette.load_moves(dst) == {"uti": {"sword": {"to": 1, "from": 1}}})
     with h.tempdir() as t:

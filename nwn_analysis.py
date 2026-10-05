@@ -1158,6 +1158,17 @@ def run_analysis(out_dir, verbose=True):
         """The file-level node that holds n_ (placed objects live in their area's .git)."""
         return "area:" + n_.split(":")[1] if n_.startswith("inst:") else n_
 
+    pal_types = {"creature": "utc", "door": "utd", "encounter": "ute", "item": "uti", "placeable": "utp",
+                 "sound": "uts", "store": "utm", "trigger": "utt", "waypoint": "utw"}   # = nwn_build.PALETTE_EXT
+
+    def palette_lists(src, nid):
+        """True when src is a palette file (.itp) of nid's own blueprint type: its mention of nid is the palette entry,
+        which the build drops when nid is merged away (nwn_build.Rewriter._prune_palette)."""
+        if not (src.startswith("file:") and src.endswith(".itp") and nid.startswith("bp:")):
+            return False
+        stem = src[5:-4].rsplit("/", 1)[-1].lower()
+        return pal_types.get(re.sub(r"pal(cus|std)?$", "", stem)) == nid.rpartition(".")[2]
+
     def unrewritable_refs(nid):
         """Why this member can't be merged away: references the builder cannot re-point safely."""
         bad = []
@@ -1178,6 +1189,8 @@ def run_analysis(out_dir, verbose=True):
                 continue
             if k == "spawns" and g.type(s_) in ("blueprint", "instance"):
                 continue  # encounter CreatureList ResRef - rewritable
+            if k == "name_ref" and palette_lists(s_, nid):
+                continue  # the custom palette's entry for it: the build drops that entry (logged), the audit allows it
             if k == "name_ref" and any(owner_of(s2) == s_ and (k2 in REWRITABLE_KINDS or
                                                            (k2 == "spawns" and g.type(s2) in ("blueprint", "instance")))
                                        for s2, k2, v2 in g.rev.get(nid, [])):
@@ -1217,6 +1230,8 @@ def run_analysis(out_dir, verbose=True):
                 b = unrewritable_refs(m["node"])
                 if b:
                     blocked.append(f"{m['label']}: {'; '.join(b[:3])}")
+        if blocked and "Safe to merge" in note:   # don't say "safe" next to the reasons it can't be merged
+            note = note.split(" Safe to merge")[0] + " Not merged automatically: see why below."
         dups.append(dict(id=gid, category=category, note=note, members=members, keeper=keeper,
                          mergeable=bool(mergeable_default and not blocked), blocked=blocked))
 
@@ -1228,7 +1243,7 @@ def run_analysis(out_dir, verbose=True):
             by_hash[(f["ext"], f["content_hash"])].append(f["node"])
     for (ext, h), nodes in by_hash.items():
         cat = "Conversation - identical" if ext == "dlg" else f"{'Item' if ext == 'uti' else 'Blueprint'} ({ext}) - identical"
-        add_group(cat, nodes, "Same content, different resref. Safe to merge: references are re-pointed to the keeper.", True)
+        add_group(cat, nodes, "Same content, different resref (file name): separate files that make the same thing. Safe to merge: references are re-pointed to the keeper.", True)
     # items - same function, different name/look
     by_func = defaultdict(list)
     for it in items:
@@ -2052,7 +2067,8 @@ def run_analysis(out_dir, verbose=True):
         if d["status"] != "Review":
             del_bytes += d["bytes"]
     summary = dict(module_name=meta.get("module_name") or os.path.basename(out_dir.rstrip("/\\")),
-                   module_path=meta.get("module_path"), indexed_at=meta.get("indexed_at"),
+                   module_path=meta.get("module_path"), module_source=meta.get("module_source"),
+                   indexed_at=meta.get("indexed_at"),
                    files=len(files), module_files=len(module_files), total_bytes=sum(f["size"] or 0 for f in files),
                    areas=len(areas), scripts=len(scripts), items=len(items),
                    blueprints=sum(1 for n_ in g.nodes.values() if n_["type"] == "blueprint" and n_["in_module"]),
@@ -2085,7 +2101,7 @@ def run_analysis(out_dir, verbose=True):
     summary["asset_duplicate_groups"] = len(asset_dups)
     report = dict(summary=summary, issues=issues, scripts=scripts, items=items, orphan_instances=orphan_instances,
                   orphans=orphans, skins=skins, ai_findings=ai_findings, performance=performance,
-                  duplicates=dups, asset_duplicates=asset_dups, deletions=deletions, areas=areas, conversations=convs, conversation_dynamic_starts=dyn_starts[:300], quests=quests,
+                  duplicates=dups, merge_rules=2, asset_duplicates=asset_dups, deletions=deletions, areas=areas, conversations=convs, conversation_dynamic_starts=dyn_starts[:300], quests=quests,
                   inferred_quests=inferred, var_audit=var_audit, pw_performance=pw_perf, factions=factions, databases=databases,
                   files=file_rows, models=models, hierarchy=g.hierarchy(),
                   breadcrumbs={nid: g.breadcrumb(nid) for nid in g.nodes if nid.startswith("inst:")},

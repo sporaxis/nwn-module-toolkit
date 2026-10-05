@@ -217,7 +217,10 @@ def tricky_tests(tmp, root):
         check(f"runtime-built/tag-based {sc} is never plain Safe", st.get(sc) in (None, "Review"), st.get(sc))
     grp = {frozenset(m["node"] for m in g_["members"]): g_ for g_ in r["duplicates"]}
     gob = next(g_ for k, g_ in grp.items() if "bp:goblin_b.utc" in k)
-    check("merge blocked: goblin_b named in a waypoint variable", not gob["mergeable"], gob)
+    # goblin_b is named in a waypoint variable (its name can't be re-pointed): it is never merged away - it is the
+    # group's keeper, so merging removes goblin_a (whose placed copy and palette entry can be re-pointed / dropped)
+    check("merge: goblin_b, named in a waypoint variable, is never merged away (it is the keeper)",
+          gob["keeper"] == "bp:goblin_b.utc" and (gob["mergeable"] or gob["blocked"]), gob)
     ev = next(g_ for k, g_ in grp.items() if "script:ev_b" in k)
     check("compiled script chosen as keeper (ev_b over uncompiled ev_a)", ev["keeper"] == "script:ev_b", ev["keeper"])
     hb = next(g_ for k, g_ in grp.items() if "script:hb_b" in k)
@@ -258,6 +261,10 @@ def tricky_tests(tmp, root):
     pal = n.read_gff_file(os.path.join(clean, "itempalcus.itp"))
     rr = [x for _, lab, _, x, _ in n.iter_gff_leaves(pal) if lab == "RESREF"]
     check("palette cleanup respects blueprint type (item goblin_b kept)", "goblin_b" in [x.lower() for x in rr], rr)
+    cpal = n.read_gff_file(os.path.join(clean, "creaturepalcus.itp"))
+    crr = sorted(x.lower() for _, lab, _, x, _ in n.iter_gff_leaves(cpal) if lab == "RESREF")
+    check("palette: the merged-away creature goblin_a is dropped, the keeper goblin_b stays",
+          crr == ["goblin_b"] if gob["mergeable"] else crr == ["goblin_a", "goblin_b"], crr)
     check("stale .mod replaced by this build", open(log["mod_file"], "rb").read(4) == b"MOD ")
     bad = [c for c in log["audit"]["checks"] if c["status"] not in ("PASS", "SKIPPED")]
     check("tricky build audit passes", not bad, bad)

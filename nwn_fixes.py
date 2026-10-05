@@ -243,6 +243,11 @@ FIXES = {
                                 "that counted by the old labels."),
     "symlink_skipped": lambda i: ("Copy the real files into the module folder if they belong to it; links are never "
                                   "followed."),
+    "json_unreadable": lambda i: ("Open the file named above in your nasher project and fix it (or unpack that "
+                                  "resource again with nasher), then press Analyse again. Until then the analysis "
+                                  "and any build leave it out."),
+    "json_duplicate_name": lambda i: ("Keep one copy: delete or rename the other in your nasher project (nasher pack "
+                                      "would also put only one into the .mod), then press Analyse again."),
 }
 
 

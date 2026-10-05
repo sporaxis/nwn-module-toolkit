@@ -41,6 +41,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import nwnlib as n  # noqa: E402
 import nwn_index  # noqa: E402
+import nwn_nasher  # noqa: E402
 import nwn_progress  # noqa: E402
 
 # file extension -> the group it is counted in when showing what a hak "carries"; anything else is "other"
@@ -66,6 +67,15 @@ def list_module(module_path):
     Only file names and sizes are read, plus module.ifo itself. A problem is returned as error text, not raised
     (except a .mod whose ERF header is damaged, which raises ValueError from nwnlib.Erf)."""
     items, skipped, root, err = [], [], None, None
+    if nwn_nasher.is_project(module_path):
+        # a nasher project: GFF files as <name>.<ext>.json, listed under the game names they become
+        res, skipped = nwn_nasher.list_resources(module_path)
+        items = [(r, e, size) for r, e, size, _rel, _j in res]
+        try:
+            root = nwn_nasher.read_ifo(module_path)
+        except ValueError as ex:
+            err = f"module.ifo.json could not be read: {ex}"
+        return items, skipped, root, err
     if os.path.isdir(module_path):
         # the indexer's walk: hidden folders (.git of a nasher / build folder) and symbolic links are skipped
         for full, rel in n.walk_folder(module_path):
@@ -264,10 +274,6 @@ def scan(module_path, haks=(), nwn_root=None, nwn_user=None, workspace=None):
     scripts_bin = ext_counts.get("ncs", 0)
     # a hint only: NWNX include scripts are conventionally named nwnx_<plugin>; their presence suggests NWNX is used
     nwnx = sorted({r for r, e, _ in mod["items"] if e in ("nss", "ncs") and r.startswith(("nwnx", "inc_nwnx"))})
-    for ev, sc in events.items():
-        if f"{sc}.nss" not in names and f"{sc}.ncs" not in names:
-            warnings.append(dict(level="info", text=f"module event {event_name(ev)} runs '{sc}', which is not in the module "
-                                 "(fine if it is a base-game or hak script)"))
     long_names = sorted(f"{r}.{e}" for r, e, _ in mod["items"] if len(r) > 16)   # a resref holds 16 characters
     if long_names:
         warnings.append(dict(level="error", text=f"{len(long_names)} module file(s) have names over 16 characters "
@@ -276,7 +282,8 @@ def scan(module_path, haks=(), nwn_root=None, nwn_user=None, workspace=None):
         warnings.append(dict(level="info", text=f"{len(plan['skipped'])} non-game file(s) in the module folder are ignored "
                              f"(e.g. {', '.join(plan['skipped'][:3])})"))
 
-    module = dict(path=os.path.abspath(module_path), kind="folder" if os.path.isdir(module_path) else ".mod",
+    module = dict(path=os.path.abspath(module_path), kind=("nasher project" if nwn_nasher.is_project(module_path) else "folder") if os.path.isdir(module_path)
+                  else ".mod",
                   files=mod["files"], bytes=mod["bytes"], areas=ext_counts.get("are", 0),
                   scripts=max(scripts_src, scripts_bin), scripts_source=scripts_src, scripts_compiled=scripts_bin,
                   conversations=ext_counts.get("dlg", 0), journal=bool(ext_counts.get("jrl")),
@@ -314,6 +321,25 @@ def scan(module_path, haks=(), nwn_root=None, nwn_user=None, workspace=None):
     for m in plan["haks_missing"]:
         warnings.append(dict(level="error", text=f"hak '{m}' is listed in module.ifo but was not found "
                              "(the full analysis will mark hak-dependent results as Review)"))
+
+    # --- module event scripts that are not in the module: fine when a hak or the base game has them (x2_mod_def_act
+    # and the other default scripts come with the game). Base game: its key file when the install folder is set,
+    # else the usual base-game name prefixes.
+    hak_names = {f"{r}.{e}" for s in plan["sources"] if s["kind"] == "hak" for r, e, _ in s["items"]}
+    base_names = n.base_game_names(nwn_root) if events and nwn_root else set()
+    for ev, sc in events.items():
+        files = (f"{sc}.nss", f"{sc}.ncs")
+        if any(f in names or f in hak_names for f in files):
+            continue
+        if any(f in base_names for f in files) or (not base_names and sc.startswith(nwn_index.BASE_GAME_PREFIXES)):
+            continue
+        if base_names:
+            warnings.append(dict(level="error", text=f"module event {event_name(ev)} runs '{sc}', which is not in the "
+                                 "module, its haks or the base game - the event does nothing"))
+        else:
+            warnings.append(dict(level="warning" if not plan["haks_missing"] else "info",
+                                 text=f"module event {event_name(ev)} runs '{sc}', which is not in the module or its "
+                                 "haks (fine if it is a base-game script; set the NWN install folder to check)"))
 
     # --- talk tables
     base_tlk = next((c for c in nwn_index.base_tlk_candidates(nwn_root) if os.path.isfile(c)), None)

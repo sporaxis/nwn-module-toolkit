@@ -571,6 +571,50 @@ console.log(JSON.stringify({n_all: all.length, n_win: win.length, hidden: all[1]
           o["cells"] == ["'=1+1", "'-x", "'@a", "plain", '"say ""hi"", ok"'], o["cells"])
 
 
+def merge_listed_twins(tmp):
+    """Two identical items both listed in the module's custom palette (as nearly every blueprint is): the palette entry
+    doesn't block the merge; the build drops the merged-away entry (logged) and the audit passes. A tester saw such a
+    pair marked "Safe to merge" yet held back as a manual decision."""
+    from _gff import inst_item
+    mod = os.path.join(tmp, "twins"); os.makedirs(mod)
+    w(mod, "module.ifo", ifo())
+    w(mod, "area001.are", n.write_gff(gff("ARE ", Name=loc("Yard"), Tag=(X, "YARD"), ResRef=(R, "area001"),
+                                          Tileset=(R, "tcn01"))))
+    w(mod, "area001.git", n.write_gff(gff("GIT ", List=(LST, [inst_item("blade_a", "BLADE", "Blade")]))))
+    w(mod, "blade_a.uti", uti("blade_a", "Blade", 10, tag="BLADE"))
+    w(mod, "blade_b.uti", uti("blade_b", "Blade", 10, tag="BLADE"))
+    w(mod, "itempalcus.itp", itp(cat(name="Blades", pid=10, children=[entry("blade_a", "Blade"), entry("blade_b", "Blade")])))
+    out = os.path.join(tmp, "twins_analysis")
+    rep = h.analyse(mod, out)
+    g = next((d for d in rep["duplicates"] if {m["node"] for m in d["members"]} == {"bp:blade_a.uti", "bp:blade_b.uti"}), None)
+    check("merge: identical items listed in the custom palette are one mergeable group",
+          g is not None and g["mergeable"] and not g["blocked"] and g["keeper"] == "bp:blade_a.uti", g)
+    if not g:
+        return
+    log = nwn_build.build(out, dict(delete=[], merge=[g["id"]], allow_review=True), name="twins_clean", verbose=False,
+                          audit_kwargs=dict(compiler=h.NO_COMPILER))
+    check("merge: blade_b is merged into blade_a", [m["removed"] for m in log["merged"]] == ["Blade [blade_b.uti]"] and
+          not os.path.exists(os.path.join(out, "build", "twins_clean", "blade_b.uti")), log["merged"])
+    ent = _itp_entries(_clean_gff(out, "twins_clean", "itempalcus.itp"))
+    check("merge: the palette file no longer lists the merged-away item; the keeper stays", ent == {"blade_a": 10}, ent)
+    check("merge: the dropped palette entry is in the change log",
+          any(c["file"].endswith("itempalcus.itp") and c["old"] == "blade_b" and c["new"] is None for c in log["field_changes"]),
+          [c for c in log["field_changes"] if c["file"].endswith(".itp")])
+    checks = {c["id"]: c["status"] for c in log["audit"]["checks"]}
+    check("merge: the audit passes", "FAIL" not in checks.values(), checks)
+    # a blocked group must not also say "Safe to merge"
+    import nwn_analysis
+    blocked = [d for d in rep["duplicates"] if d["blocked"]]
+    check("wording: no blocked group says it is safe to merge", not any("Safe to merge" in d["note"] for d in blocked),
+          [d["note"] for d in blocked])
+    check("wording: the identical-content note is in the analysis code", "Not merged automatically" in
+          open(nwn_analysis.__file__, encoding="utf-8").read())
+    check("wording: identical groups say the members are separate files", "different resref (file name)" in g["note"], g["note"])
+    page = open(os.path.join(h.ROOT, "dashboard.html"), encoding="utf-8").read()
+    check("page: the Duplicates page shows each member's file name (resref) in its own column",
+          "File (resref)</th>" in page and "const dupFile = " in page and "dupFile(x.node)" in page)
+
+
 def main():
     """Run every group of checks in a temporary folder; returns the exit code (tests/_harness.summary)."""
     with h.tempdir("nwn_pal_") as tmp:
@@ -584,6 +628,7 @@ def main():
             h.run(moves_build, out)
             h.run(mass_import, out)
         h.run(hak_palette_wins, tmp)
+        h.run(merge_listed_twins, tmp)
         h.run(page_script)
     return h.summary()
 

@@ -607,7 +607,7 @@ VIEWS.home = async (m) => {
   if (STATIC) return go("overview");
   let st; try { st = await api("/api/state"); } catch(e){ m.innerHTML = `<div class="note warn">${esc(e.message)}</div>`; return; }
   S.analyses = st.analyses; S.settings = st.settings; S.workspace = st.workspace; S.version = st.version || S.version; S.reanalyse = st.reanalyse || []; renderNav();
-  m.innerHTML = `<h1>Modules</h1><p class="sub">Point the toolkit at an unpacked module folder (the one containing <span class="mono">module.ifo</span>) or a <span class="mono">.mod</span> file. Your original is only read, never changed.</p>
+  m.innerHTML = `<h1>Modules</h1><p class="sub">Point the toolkit at an unpacked module folder (the one containing <span class="mono">module.ifo</span>), a nasher project folder (JSON files) or a <span class="mono">.mod</span> file. Your original is only read, never changed.</p>
   <div id="upd"></div>
   <div class="card"><h3 style="margin-top:0">Analyse a module</h3>
     <div class="row"><input type="text" class="wide grow" id="modPath" placeholder="e.g. C:\\Users\\you\\Documents\\Neverwinter Nights\\modules\\MyModule.mod or ~/Documents/Neverwinter Nights/modules/MyModule.mod" value=""><button class="btn" id="browse">Browse…</button></div>
@@ -914,7 +914,7 @@ function renderAnalysesList(list){
   if (!list.length) return;
   new Table(al, {rows: list, onRow: a => !a.incomplete && !a.archived && load(a.name), columns: [
     {key:"module_name", label:"Module", render: a => `<b>${esc(a.module_name||a.name)}</b>`},
-    {key:"module_path", label:"Source", render: a => `<span class="mono small">${esc(a.module_path||"")}</span>`},
+    {key:"module_path", label:"Source", render: a => `<span class="mono small">${esc(a.module_source||a.module_path||"")}</span>${a.module_source?' <span class="small muted">(nasher)</span>':""}`},
     {key:"indexed_at", label:"Analysed", render: a => esc(a.incomplete ? (a.indexed_at ? "started " + a.indexed_at : "") : a.indexed_at)},
     {key:"status", label:"Status", sort: a => a.incomplete ? (a.running ? 1 : 2) : a.archived ? 3 : 0, render: a => a.running ? stBadge("running") :
       a.incomplete ? `${stBadge("incomplete")} <button class="btn small" data-clear="${esc(a.name)}">Clear</button>` :
@@ -1636,7 +1636,7 @@ VIEWS.overview = (m) => {
   const TN = {nss:"script source", ncs:"compiled script", uti:"item", utc:"creature", utp:"placeable", utd:"door", utm:"store",
     utt:"trigger", utw:"waypoint", ute:"encounter", uts:"sound", are:"area", git:"area objects", gic:"area comments", dlg:"conversation",
     tga:"texture", dds:"texture", mdl:"model", "2da":"2da table", wav:"sound", ifo:"module info", jrl:"journal", itp:"palette", fac:"factions"};
-  m.innerHTML = `<h1>${esc(s.module_name)}</h1><p class="sub"><span class="mono small">${esc(s.module_path)}</span> · analysed ${esc(s.indexed_at)}${STATIC?" · static report":""} ${openInButtons(s.module_path)}</p>
+  m.innerHTML = `<h1>${esc(s.module_name)}</h1><p class="sub">${s.module_source ? `nasher project <span class="mono small">${esc(s.module_source)}</span> (converted into the analysis folder; your files are only read)` : `<span class="mono small">${esc(s.module_path)}</span>`} · analysed ${esc(s.indexed_at)}${STATIC?" · static report":""} ${openInButtons(s.module_source || s.module_path)}</p>
   ${versionNotice(r)}
   ${s.haks_missing || s.base_game_indexed === false ? `<div class="note warn small"><b>Not everything was read:</b> ${[s.haks_missing ? `${fmtN(s.haks_missing)} hak(s) the module uses were not found` : "", s.base_game_indexed === false ? "the base game was not read" : ""].filter(Boolean).join(" and ")}. So some "missing" errors below may be things those provide, and anything they could use is kept as Review, never Safe. For exact results, ${[s.haks_missing ? "add the missing haks" : "", s.base_game_indexed === false ? "set the NWN install folder in Settings (Modules page)" : ""].filter(Boolean).join(" and ")}, then analyse again.</div>` : ""}
   <div class="tiles">
@@ -1945,8 +1945,8 @@ VIEWS.duplicates = (m) => {
     $("#list", m).innerHTML = gs.map(g => `<div class="card"><div class="row"><b class="grow">#${g.id} ${esc(g.category)}</b>
       ${g.mergeable?`<label class="small"><input type="checkbox" data-g="${g.id}" ${S.merge.has(g.id)?"checked":""} ${STATIC?"disabled":""}> merge in clean build</label>`:`<span class="badge sv-info"><i></i>manual decision</span>`}</div>
       <p class="small muted" style="margin:4px 0 8px">${esc(g.note)}</p>
-      <div class="tw"><table class="dt"><thead><tr><th>Member</th><th>References</th><th>Impact</th><th></th></tr></thead><tbody>${g.members.map(x =>
-        `<tr><td>${x.node.endsWith(".uti") || x.node.includes("ItemList") ? iconSlot(x.node) + " " : ""}${nl(x.node, x.label)}${x.differs ? `<br>${dupChips(x.differs)}` : ""}</td><td class="num">${fmtN(x.refs)}</td><td>${lvBadge(x.impact)}</td><td>${x.node===g.keeper?"<b>keeper</b>":(!STATIC && x.node.startsWith("bp:") && g.keeper.startsWith("bp:") ? `<button class="btn small" data-rk="${esc(x.node)}|${esc(g.keeper)}" title="Find everything that uses this copy and point it at the keeper instead">Use keeper instead…</button>` : "")}</td></tr>`).join("")}</tbody></table></div>
+      <div class="tw"><table class="dt"><thead><tr><th>Member</th><th title="The resref: each member is its own file - two files can't share one">File (resref)</th><th>References</th><th>Impact</th><th></th></tr></thead><tbody>${g.members.map(x =>
+        `<tr><td>${x.node.endsWith(".uti") || x.node.includes("ItemList") ? iconSlot(x.node) + " " : ""}${nl(x.node, x.label)}${x.differs ? `<br>${dupChips(x.differs)}` : ""}</td><td class="mono">${esc(dupFile(x.node))}</td><td class="num">${fmtN(x.refs)}</td><td>${lvBadge(x.impact)}</td><td>${x.node===g.keeper?"<b>keeper</b>":(!STATIC && x.node.startsWith("bp:") && g.keeper.startsWith("bp:") ? `<button class="btn small" data-rk="${esc(x.node)}|${esc(g.keeper)}" title="Find everything that uses this copy and point it at the keeper instead">Use keeper instead…</button>` : "")}</td></tr>`).join("")}</tbody></table></div>
       ${g.blocked.length?`<div class="note warn small">Not auto-mergeable: ${g.blocked.map(esc).join("<br>")}</div>`:""}</div>`).join("") || `<p class="muted">No duplicates match.</p>`;
     $("#list", m).querySelectorAll("[data-g]").forEach(c => c.onchange = () => { c.checked ? S.merge.add(+c.dataset.g) : S.merge.delete(+c.dataset.g); remember(); });
     fillIcons($("#list", m));
@@ -2473,6 +2473,8 @@ function tokensTab(host, va){
 }
 
 // ---------------------------------------------------------------- find everywhere + rename / replace
+// a duplicate member's file name (its resref): bp:sword_b.uti -> sword_b.uti, script:x -> x; "" for other nodes
+const dupFile = node => /^(bp|script|dlg|asset):/.test(node) ? node.slice(node.indexOf(":") + 1) : "";
 // how a duplicate differs from its keeper -> colour; dupChips shows the differences as chips
 const DCL = {look: "critical", name: "warning", tag: "warning", stats: "serious", scripts: "serious", inventory: "neutral", variables: "neutral", other: "neutral"};
 const dupChips = d => d.total ? `<span class="small muted">differs from keeper:</span> ${Object.entries(d.counts).map(([k, v]) => `<span class="chip" title="${esc(d.examples.filter(x => x.cls === k).map(x => x.path + ": " + (x.a ?? "-") + " → " + (x.b ?? "-")).join("\n"))}" style="border-color:var(--${DCL[k]||"neutral"})">${esc(k)} ${v}</span>`).join(" ")}` : `<span class="small muted">identical apart from its name</span>`;
@@ -3323,7 +3325,15 @@ VIEWS.build = async (m) => {
       <p class="small">Copies the clean <span class="mono">.mod</span> into your modules folder and each <b>rebuilt</b> hak into your hak folder (NWN user folder from Settings: <span class="mono">${esc(user || "not set")}</span>). <b>Nothing is replaced</b>: if any of the names already exists, nothing is copied. Each copy is checked against the build before it gets its name. <b>Undo</b> removes exactly the files it added, if you have not changed them.</p>
       ${user ? "" : `<div class="note warn small">Set your NWN user folder (the one with the <span class="mono">modules</span> and <span class="mono">hak</span> folders) in Settings on the Modules page first.</div>`}
       <div class="row"><button class="btn primary" id="binstgo" ${user ? "" : "disabled"}>Add to game folders…</button>${open_ ? `<button class="btn" id="binstundo">Undo</button>` : ""}<span class="small muted" id="binstmsg"></span></div>
-      ${inst.files ? `<p class="small" style="margin-bottom:2px">Last add: <b>${esc(inst.status)}</b> ${esc(inst.finished || inst.started || "")}${inst.undone ? ` · undo ${esc(inst.undone)}` : ""}</p><ul class="small">${inst.files.map(f => `<li class="mono">${esc(f.target)} - ${esc(f.undo || f.status)}</li>`).join("")}</ul>` : ""}</div>`;
+      ${inst.files ? `<p class="small" style="margin-bottom:2px">Last add: <b>${esc(inst.status)}</b> ${esc(inst.finished || inst.started || "")}${inst.undone ? ` · undo ${esc(inst.undone)}` : ""}</p><ul class="small">${inst.files.map(f => `<li class="mono">${esc(f.target)} - ${esc(f.undo || f.status)}</li>`).join("")}</ul>` : ""}</div>
+      <div class="card"><h2 style="margin-top:0">Save as nasher project</h2>
+      <p class="small">Writes this build as a nasher project (each resource as <span class="mono">src/&lt;type&gt;/&lt;name&gt;.&lt;type&gt;.json</span>, scripts and tables as they are, and a starter <span class="mono">nasher.cfg</span>) into a folder beside the build, for git or to compare with your own nasher source. Your module is not touched. Saving again replaces that folder.</p>
+      <div class="row"><button class="btn" id="bnash">Save as nasher project</button><span class="small muted" id="bnashmsg"></span></div><div id="bnashjob"></div></div>`;
+    $("#bnash", m).onclick = async () => {
+      let j; try { j = await post("/api/build/nasher", {a: S.cur}); } catch(e){ $("#bnashmsg", m).textContent = e.message; return; }
+      $("#bnash", m).disabled = true;
+      watchJob(j.job, $("#bnashjob", m), () => doneBox(`Saved as a nasher project in ${j.dest}`), () => { $("#bnash", m).disabled = false; });
+    };
     $("#binstgo", m).onclick = async () => {
       const fail = b.audit.verdict === "FAIL";
       if (fail && !await dialog({title: "The audit FAILED", danger: true, ok: "Show what would be copied", check: "I understand the audit verdict is FAIL and still want to add this build to my game folders",

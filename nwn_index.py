@@ -1792,6 +1792,15 @@ def run_index(module_path, haks=(), overrides=None, tlk=None, out=None, write_js
                              time_budget, state_path, t0)
     if os.path.exists(state_path):
         os.remove(state_path)      # a run without a budget starts fresh: an old checkpoint no longer matches
+    # a nasher project (GFF files as JSON text): converted into an ordinary module folder inside `out` first, and that
+    # copy is indexed (builds start from it). The project folder is only read. A resumed run keeps using the copy.
+    module_source, conv = None, None
+    import nwn_nasher
+    if nwn_nasher.is_project(module_path):
+        module_source = os.path.abspath(module_path)
+        os.makedirs(out, exist_ok=True)
+        conv = nwn_nasher.convert(module_path, os.path.join(out, nwn_nasher.CONVERTED))
+        module_path = conv["dest"]
     # peek at module.ifo for the custom tlk name so names resolve during indexing
     # (best effort: a damaged module.ifo is reported later, when the module itself is indexed)
     custom_name = ""
@@ -1835,6 +1844,17 @@ def run_index(module_path, haks=(), overrides=None, tlk=None, out=None, write_js
     ix.db.execute("INSERT INTO meta VALUES ('module_path', ?)", (os.path.abspath(module_path),))
     ix.db.execute("INSERT INTO meta VALUES ('indexed_at', ?)", (time.strftime("%Y-%m-%d %H:%M:%S"),))
     ix.db.execute("INSERT INTO meta VALUES ('tlk_custom_name', ?)", (custom_name,))
+    if conv:
+        ix.db.execute("INSERT INTO meta VALUES ('module_source', ?)", (module_source,))
+        ix.db.execute("INSERT INTO meta VALUES ('module_format', 'nasher json')")
+        ix.log(f"  nasher project: {module_source} - {conv['converted']} JSON file(s) converted and {conv['copied']} "
+               f"copied into {module_path} (the project folder is only read)")
+        for e in conv["errors"]:
+            ix.issue("error", "json_unreadable", "module", f"{e} - left out of the analysis; fix the file (or run "
+                     "nasher pack and analyse the .mod) and analyse again")
+        for name, used, ignored in conv["clashes"]:
+            ix.issue("warning", "json_duplicate_name", f"file:{name}", f"the project holds {name} twice: {used} was "
+                     f"used, {ignored} ignored - a module holds one file per name; remove or rename one of them")
     try:
         ix.add_source(module_path, "module", 0)
     except Checkpoint as cp:
