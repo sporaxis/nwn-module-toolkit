@@ -1,0 +1,121 @@
+"""
+Tests for keeping noise out of the findings (feedback: "the need to reduce false positives is quite massive - the
+signal can get lost in the noise"):
+  - a tag-based item script is in use, with everything it reaches, even when nothing places the item (players carry
+    items for years; a tester's teleport stone script was listed as unused);
+  - a problem that only sits in unused content is an info note, not an error or warning;
+  - haks layered on each other (the same model/texture in two haks) is an info note; the module's own copy hidden by a
+    hak stays a warning;
+  - an unused item held back only by general reasons (the DMs' palette, scripts creating objects from saved names) is
+    "likely in use", counted apart on the Overview and hidden on Safe to delete until asked for.
+    python tests/test_noise.py          (last line "N/M checks passed"; exit code 1 on a failure)
+Works only in temporary folders and the test workspace (see tests/_harness.py).
+"""
+import _harness as h  # noqa: F401 - first: isolates the workspace and the compiler before toolkit modules load
+import os
+import sys
+
+import nwnlib as n  # noqa: E402
+from _harness import check  # noqa: E402
+from _gff import st, root, loc, item_fields, w, R, X, B, DW, LST, stand_in_ncs  # noqa: E402
+
+
+def script(mod, name, code):
+    """A script with its compiled stand-in."""
+    w(mod, name + ".nss", code)
+    w(mod, name + ".ncs", stand_in_ncs(name))
+
+
+def dlg(action_script):
+    """A one-line conversation whose line runs action_script."""
+    return root("DLG ", EndConversation=(R, ""), EndConverAbort=(R, ""),
+                EntryList=(LST, [st(0, Text=loc("Where to?"), Speaker=(X, ""), Script=(R, action_script),
+                                    Quest=(X, ""), QuestEntry=(DW, 0), RepliesList=(LST, []))]),
+                ReplyList=(LST, []), StartingList=(LST, [st(0, Index=(DW, 0), Active=(R, ""))]))
+
+
+def fixture(tmp):
+    """The module: one area (a door whose OnOpen names a script that is gone), a teleport stone item that nothing
+    places but the item palette lists (tag port_stone -> port_stone.nss opens port_dlg, whose line runs port_go), an
+    old conversation nothing uses whose line names a missing script, a cloak in the palette that a script may create
+    from a saved name, and two haks: both carry the same texture, one also a copy of a module script."""
+    mod = os.path.join(tmp, "mod")
+    os.makedirs(mod)
+    g = lambda fn, r: w(mod, fn, n.write_gff(r))  # noqa: E731
+    g("module.ifo", root("IFO ", Mod_Name=loc("Noise"), Mod_Entry_Area=(R, "area001"),
+                         Mod_Area_list=(LST, [st(6, Area_Name=(R, "area001"))]),
+                         Mod_OnModLoad=(R, "mod_load"), Mod_OnActvtItem=(R, "x2_mod_def_act"),
+                         Mod_HakList=(LST, [st(8, Mod_Hak=(X, "noise_a")), st(8, Mod_Hak=(X, "noise_b"))])))
+    g("area001.are", root("ARE ", Name=loc("Yard"), Tag=(X, "YARD"), ResRef=(R, "area001"), Tileset=(R, "tcn01")))
+    g("area001.git", root("GIT ", **{"Door List": (LST, [st(8, TemplateResRef=(R, "door1"), Tag=(X, "DOOR1"),
+                                                         LocName=loc("Door"), OnOpen=(R, "gone_live"))])}))
+    g("port_stone.uti", root("UTI ", **item_fields("port_stone", "port_stone", "Teleport Stone")))
+    g("cloak_saved.uti", root("UTI ", **item_fields("cloak_saved", "CLOAK_SAVED", "Old Cloak")))
+    g("itempalcus.itp", root("ITP ", MAIN=(LST, [st(0, NAME=(X, "Misc"), ID=(B, 1), LIST=(LST, [
+        st(0, RESREF=(R, "port_stone"), NAME=(X, "Teleport Stone")), st(0, RESREF=(R, "cloak_saved"), NAME=(X, "Old Cloak"))]))])))
+    script(mod, "port_stone", 'void main()\n{\n    object oPC = GetItemActivator();\n'
+                              '    AssignCommand(oPC, ActionStartConversation(oPC, "port_dlg", TRUE));\n}\n')
+    g("port_dlg.dlg", dlg("port_go"))
+    script(mod, "port_go", 'void main()\n{\n    JumpToObject(GetWaypointByTag(GetScriptParam("DEST")));\n}\n')
+    g("old_dlg.dlg", dlg("gone_dead"))                                     # nothing uses it
+    script(mod, "mod_load", 'void main()\n{\n    object oPC = GetFirstPC();\n'
+                            '    CreateItemOnObject(GetCampaignString("bank", "item"), oPC);\n}\n')
+    # haks: the same texture in both (layered); hak b also carries mod_load.ncs (hides the module's own)
+    ha, hb = os.path.join(tmp, "ha"), os.path.join(tmp, "hb")
+    os.makedirs(ha); os.makedirs(hb)
+    for d in (ha, hb):
+        w(d, "wall01.tga", bytes([0, 0, 2] + [0] * 9) + bytes([1, 0, 1, 0, 24, 0x20]) + bytes(3))
+    w(hb, "mod_load.ncs", stand_in_ncs("other"))
+    haks = [os.path.join(tmp, "noise_a.hak"), os.path.join(tmp, "noise_b.hak")]
+    h.pack_hak(ha, haks[0])
+    h.pack_hak(hb, haks[1])
+    return mod, haks
+
+
+def main_checks(tmp):
+    mod, haks = fixture(tmp)
+    out = os.path.join(tmp, "an")
+    rep = h.analyse(mod, out, haks=haks)
+    dele = {d["node"]: d for d in rep["deletions"]}
+    check("item script: port_stone.nss (the stone's tag) is in use, not listed as unused", "script:port_stone" not in dele,
+          dele.get("script:port_stone"))
+    check("item script: and so is what it reaches (the conversation it opens, the script its line runs)",
+          "dlg:port_dlg" not in dele and "script:port_go" not in dele, [k for k in dele if "port" in k])
+    check("item script: the stone blueprint itself stays Review (only the palette lists it)",
+          dele.get("bp:port_stone.uti", {}).get("status") == "Review", dele.get("bp:port_stone.uti"))
+    iss = {(i["category"], i["detail"].split(" -> ")[-1][:12]): i for i in rep["issues"] if i["category"] == "missing_script"}
+    live = next((i for i in rep["issues"] if i["category"] == "missing_script" and "gone_live" in i["detail"]), None)
+    dead = next((i for i in rep["issues"] if i["category"] == "missing_script" and "gone_dead" in i["detail"]), None)
+    check("unused content: a missing script named in a used area stays an error", live and live["severity"] == "error", live)
+    check("unused content: one named only in an unused conversation is an info note saying so",
+          dead and dead["severity"] == "info" and "only in unused content" in dead["detail"], dead)
+    check("summary: the count of issues lowered this way", rep["summary"].get("issues_in_unused", 0) >= 1, rep["summary"].get("issues_in_unused"))
+    rc = {i["node"]: i for i in rep["issues"] if i["category"] == "resource_conflict"}
+    check("haks: the same texture in two haks is an info note (layered on purpose)",
+          rc.get("wall01.tga", {}).get("severity") == "info" and "layered" in rc.get("wall01.tga", {}).get("detail", ""),
+          rc.get("wall01.tga"))
+    check("haks: a module file a hak hides stays a warning", rc.get("mod_load.ncs", {}).get("severity") == "warning",
+          rc.get("mod_load.ncs"))
+    cl = dele.get("bp:cloak_saved.uti", {})
+    check("likely in use: an item held back only by the palette and saved-name creation is marked general",
+          cl.get("status") == "Review" and cl.get("general") is True, cl)
+    check("likely in use: counted apart in the summary", rep["summary"].get("review_likely_used", 0) >= 1,
+          rep["summary"].get("review_likely_used"))
+    page = open(os.path.join(h.ROOT, "dashboard.html"), encoding="utf-8").read()
+    check("page: one Issues tile (errors + warnings) and the Review tile counts only what is worth a look",
+          ">Issues: ${fmtN(openIssues(r, \"error\"))} errors" in page and "Unused - worth a look" in page and
+          "s.review_likely_used" in page and "s.issues_in_unused" in page)
+    check("page: Issues can be grouped by what is missing (one group per missing script)", '"what\'s missing": i =>' in page)
+    check("page: Safe to delete hides likely-in-use items until 'show likely in use' is ticked",
+          "S.delGeneral" in page and "likely in use</span>" in page and 'id="dgen"' in page)
+
+
+def main():
+    """Run every group of checks; returns the exit code (tests/_harness.summary)."""
+    with h.tempdir() as t:
+        h.run(main_checks, t)
+    return h.summary()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -501,7 +501,8 @@ class Graph:
 
     def live(self, server_values=()):
         """The live set (see the module docstring): every node reachable from the roots - module.ifo, every loaded 2da,
-        every other loaded GFF file except palettes (journal, factions ...) and the loaded scripts the server's
+        every other loaded GFF file except palettes (journal, factions ...), every tag-based item script and the loaded
+        scripts the server's
         settings name (server_values: the setting values from server_config_values; NWNX_UTIL_PRE_MODULE_START_SCRIPT
         =pw_preload runs pw_preload although no module file names it). The last result is kept, so the dashboard
         can ask for it on every item it shows. Read-only."""
@@ -512,9 +513,56 @@ class Graph:
                 if nd["in_module"] and (nd["type"] == "2da" or (nid.startswith("file:") and not nid.endswith(".itp"))):
                     roots.add(nid)
             roots |= {f"script:{v}" for v in key if self.nodes.get(f"script:{v}", {}).get("in_module")}
+            # tag-based item scripts: the game runs <tag>.nss when a player uses an item with that tag - and players
+            # carry items no module file places (bought, looted, DM-given, kept in their characters for years), so
+            # such a script is in use even when nothing in the module places the item (a tester's teleport stone)
+            roots |= {nid for nid, nd in self.nodes.items() if nd["type"] == "script" and nd["in_module"] and
+                      any(k == "tag_based_script" for _s, k, _v in self.rev.get(nid, []))}
             self._live = (key, self.reachable(roots))
         return self._live[1]
 
+
+
+# Issues about what content does when it runs (a script slot naming a missing script, a tag nothing has, a heavy
+# heartbeat ...). When the content holding the problem is not in use - nothing in the module reaches it - the problem
+# can't happen in play, so it is an info note ("in unused content"), not an error or warning: on big old modules most
+# of such findings sit in leftovers (a large public world: 2,005 of 4,960 missing scripts) and buried the real ones.
+# File-level problems (a name too long to load, a damaged file, hak conflicts ...) keep their severity.
+UNUSED_DOWNGRADE = {"missing_script", "missing_conversation", "missing_blueprint", "missing_quest", "unknown_tag",
+                    "wrong_script_type", "missing_include", "missing_creature_item", "faction_invalid",
+                    "broken_strref", "creature_ai", "perf_area_heartbeats", "perf_spawn_density", "perf_inventory",
+                    "perf_heavy_heartbeat", "area_tag", "tag_case", "missing_head_model", "not_compiled"}
+# Review reasons that hold for every candidate of a kind at once (see the deletions loop): an item with only these is
+# "likely in use" (deletions[].general) and the Safe to delete page lists it apart from the ones worth a look
+GENERAL_REVIEW = ("the module uses NWNX", "hak(s) not loaded", "a script creates ", "only in the toolset palette",
+                  "the module has no ", "same name as a base-game resource", "NWN install not configured",
+                  "module not read completely")
+UNUSED_SUFFIX = " - only in unused content (nothing in the module reaches it)"
+
+
+def downgrade_unused(issues, g, live):
+    """Lower errors and warnings of the UNUSED_DOWNGRADE kinds to info when nothing in use holds them: the issue's own
+    node (a placed object counts as its area) is not live, or - for a missing resource, whose node is the thing that
+    is missing - none of the things that name it is live. Changes issues in place; returns how many were lowered."""
+    def holder_live(n):
+        return n in live or (n.startswith("inst:") and "area:" + n.split(":")[1] in live)
+    lowered = 0
+    for i in issues:
+        if i["severity"] == "info" or i["category"] not in UNUSED_DOWNGRADE:
+            continue
+        n = i["node"]
+        nd = g.nodes.get(n)
+        if nd is not None and not nd["in_module"]:          # a missing thing: judged by who names it
+            used = any(holder_live(s) for s, k, v in g.rev.get(n, []) if k != "tag_provider")
+        elif nd is not None or n.startswith(("inst:", "area:")):
+            used = holder_live(n)
+        else:
+            continue                                         # not a graph node (a file name): left as it is
+        if not used:
+            i["severity"] = "info"
+            i["detail"] += UNUSED_SUFFIX
+            lowered += 1
+    return lowered
 
 
 def _mask(bits):
@@ -967,8 +1015,15 @@ def run_analysis(out_dir, verbose=True):
                                f"{'custom' if custom else 'base'} talk table" +
                                (" (falls back to the embedded text)" if has_text else " - shows as blank in game")))
     for res, srcs in db.execute("SELECT * FROM conflicts"):
-        issues.append(dict(severity="warning", category="resource_conflict", node=res, label=res,
-                           detail=f"Same resource in several places: {srcs}"))
+        # haks that carry the same model/texture/material are layered on purpose (load order picks one - the Hak
+        # catalogue shows which): an info note. A warning only when the module's own copy or the override is involved
+        # (one of them is then not what the game uses), or for tables and tilesets, where a mix-up breaks things
+        # (2da clashes also have their own checks). A large world had 6,374 such warnings, all hak-vs-hak models/textures/materials.
+        only_haks = all(x.strip().startswith("hak:") for x in srcs.split("|"))
+        layered = only_haks and res.rpartition(".")[2].lower() not in ("2da", "set")
+        issues.append(dict(severity="info" if layered else "warning", category="resource_conflict", node=res, label=res,
+                           detail=f"Same resource in several places: {srcs}" +
+                                  (" (haks layered on each other: the first in load order wins)" if layered else "")))
     sev_order = {"error": 0, "warning": 1, "info": 2}
     issues.sort(key=lambda i: (sev_order.get(i["severity"], 3), i["category"], i["label"]))
 
@@ -1424,6 +1479,13 @@ def run_analysis(out_dir, verbose=True):
                               "checked whether DMs can spawn it from the creator")
             else:
                 note = "Not placed, not created by any script, and not in the toolset palette."
+        # general reasons hold for every candidate of a kind at once (NWNX settings not loaded, haks missing, a script
+        # creating objects from saved names, the DMs' palette, base-game overrides): they can't be settled one item at a
+        # time, so an item with only those is "likely in use" - kept, and listed apart from the ones worth a look
+        general_only = bool(review) and all(r_.startswith(GENERAL_REVIEW) or
+                                            (r_.startswith("mentioned by: ") and all(x.endswith(".itp") for x in
+                                                                                      (g.label(lr) for lr in live_refs)))
+                                            for r_ in review)
         if review:
             status = "Review"
         elif dead_refs:
@@ -1434,7 +1496,7 @@ def run_analysis(out_dir, verbose=True):
         deletions.append(dict(node=nid, label=g.label(nid), type=nd.get("type", "?"), status=status,
                               reason="; ".join(review), note=note,
                               files=[f["relpath"] for f in fl], bytes=sum(f["size"] or 0 for f in fl),
-                              group=dead_refs))
+                              group=dead_refs, general=general_only))
     # 'Safe as group' only holds while everything that uses it can go too: a user marked Review makes it Review
     # (repeated until nothing changes, so Review spreads along whole chains of users)
     by_node = {d["node"]: d for d in deletions}
@@ -1447,6 +1509,8 @@ def run_analysis(out_dir, verbose=True):
             rv = [u for u in d["group"] if by_node.get(u, {}).get("status") == "Review"]
             if rv:
                 d["status"] = "Review"
+                # only held back by users that are likely in use: likely in use too
+                d["general"] = not d["reason"] and all(by_node[u].get("general") for u in rv)
                 d["reason"] = "; ".join(filter(None, [d["reason"], "used by " + ", ".join(g.label(u) for u in rv[:3]) +
                                                       ", which is marked Review - decide on that first"]))
                 changed = True
@@ -2051,6 +2115,9 @@ def run_analysis(out_dir, verbose=True):
     except Exception as ex:  # noqa
         if verbose:
             print("  pitfall checks failed:", ex)
+    # problems that only sit in unused content become info notes (see UNUSED_DOWNGRADE)
+    issues_in_unused = downgrade_unused(issues, g, live)
+    issues.sort(key=lambda i: (sev_order.get(i["severity"], 3), i["category"], i["label"]))
 
     # ------------------------------------------------------------- summary
     # headline numbers for the dashboard's Overview page
@@ -2082,6 +2149,10 @@ def run_analysis(out_dir, verbose=True):
                    deletions=dict(del_counts), deletable_bytes=del_bytes,
                    nodes=len(g.nodes), edges=sum(len(v) for v in g.fwd.values()))
 
+    # Review items held back only by general reasons (likely in use) and issues lowered because only unused content
+    # holds them - the Overview and Safe to delete pages show these apart, so the rest stands out
+    summary["review_likely_used"] = sum(1 for d in deletions if d["status"] == "Review" and d.get("general"))
+    summary["issues_in_unused"] = issues_in_unused
     summary["factions"] = (factions.get("summary") or {}).get("factions", 0)
     summary["databases_used"] = (databases.get("summary") or {}).get("databases_used", 0)
     summary["haks_missing"] = len(haks_missing)
@@ -2105,7 +2176,7 @@ def run_analysis(out_dir, verbose=True):
     summary["asset_duplicate_groups"] = len(asset_dups)
     report = dict(summary=summary, issues=issues, scripts=scripts, items=items, orphan_instances=orphan_instances,
                   orphans=orphans, skins=skins, ai_findings=ai_findings, performance=performance,
-                  duplicates=dups, merge_rules=2, asset_duplicates=asset_dups, deletions=deletions, areas=areas, conversations=convs, conversation_dynamic_starts=dyn_starts[:300], quests=quests,
+                  duplicates=dups, merge_rules=2, noise_rules=1, asset_duplicates=asset_dups, deletions=deletions, areas=areas, conversations=convs, conversation_dynamic_starts=dyn_starts[:300], quests=quests,
                   inferred_quests=inferred, var_audit=var_audit, pw_performance=pw_perf, factions=factions, databases=databases,
                   files=file_rows, models=models, hierarchy=g.hierarchy(),
                   breadcrumbs={nid: g.breadcrumb(nid) for nid in g.nodes if nid.startswith("inst:")},

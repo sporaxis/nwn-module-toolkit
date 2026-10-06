@@ -1648,11 +1648,10 @@ VIEWS.overview = (m) => {
       `<div class="tile click" role="button" tabindex="0" data-v="${v}"><div class="v">${fmtN(s[k])}</div><div class="l">${l}</div></div>`).join("")}
   </div>
   <div class="tiles">
-    <div class="tile click" role="button" tabindex="0" data-v="issues"><div class="v" style="color:var(--critical-text)">${fmtN(openIssues(r, "error"))}</div><div class="l">⛔ Errors</div></div>
-    <div class="tile click" role="button" tabindex="0" data-v="issues"><div class="v">${fmtN(openIssues(r, "warning"))}</div><div class="l">⚠ Warnings${accCount(r) ? ` <span class="muted">(${fmtN(accCount(r))} accepted by design, not counted)</span>` : ""}</div></div>
+    <div class="tile click" role="button" tabindex="0" data-v="issues"><div class="v"${openIssues(r, "error") ? ' style="color:var(--critical-text)"' : ""}>${fmtN(openIssues(r, "error") + openIssues(r, "warning"))}</div><div class="l">Issues: ${fmtN(openIssues(r, "error"))} errors · ${fmtN(openIssues(r, "warning"))} warnings${accCount(r) ? ` <span class="muted">(${fmtN(accCount(r))} accepted by design, not counted)</span>` : ""}${s.issues_in_unused ? ` <span class="muted">(${fmtN(s.issues_in_unused)} more only in unused content: info notes)</span>` : ""}</div></div>
     <div class="tile click" role="button" tabindex="0" data-v="duplicates"><div class="v">${fmtN(s.duplicate_groups)}</div><div class="l">Duplicate groups (${fmtN(s.mergeable_groups)} auto-mergeable)</div></div>
     <div class="tile click" role="button" tabindex="0" data-v="delete"><div class="v">${fmtN((s.deletions.Safe||0)+(s.deletions["Safe as group"]||0))}</div><div class="l">Safe to delete · ${fmtBytes(s.deletable_bytes)}</div></div>
-    <div class="tile click" role="button" tabindex="0" data-v="delete"><div class="v">${fmtN(s.deletions.Review||0)}</div><div class="l">Unused - needs review</div></div>
+    <div class="tile click" role="button" tabindex="0" data-v="delete"><div class="v">${fmtN((s.deletions.Review||0) - (s.review_likely_used||0))}</div><div class="l">Unused - worth a look${s.review_likely_used ? ` <span class="muted">(${fmtN(s.review_likely_used)} more likely in use, kept)</span>` : ""}</div></div>
   </div>
   <div class="grid2">
     <div class="card"><h3 style="margin-top:0">Impact levels</h3><p class="small muted">How far a change to each resource would cascade. Click to explore.</p>
@@ -1774,7 +1773,10 @@ VIEWS.issues = (m) => {
   const t = new GroupedTable($("#t", m), {rows: [], onRow: i => openNode(i.node), after: el => bindAcc(el),
     group: rows.filter(i => i.severity !== "info" && !isAccepted(i)).length <= 20 ? "none" : undefined,
     hideCols: {"type": "category", "severity": "severity"},
-    groupings: {"type": i => i.category.replace(/_/g, " "), "severity": i => i.severity, "where": i => areaOfNode(i.node)},
+    groupings: {"type": i => i.category.replace(/_/g, " "), "severity": i => i.severity, "where": i => areaOfNode(i.node),
+                // one group per missing thing: 2,955 "missing script" rows in a big module are 900 scripts, each used in several places
+                "what's missing": i => { const m_ = /-> '([^']+)' not found|^(?:Conversation|Blueprint|Journal quest) '([^']+)'/.exec(i.detail || "");
+                  return m_ ? `${i.category.replace(/_/g, " ")}: ${m_[1] || m_[2]}` : i.category.replace(/_/g, " "); }},
     order: {"severity": (a, b) => ["error","warning","info"].indexOf(a) - ["error","warning","info"].indexOf(b),
             "type": (a, b, ra, rb) => rb.filter(i => i.severity === "error").length - ra.filter(i => i.severity === "error").length ||
                                       rb.filter(i => i.severity === "warning").length - ra.filter(i => i.severity === "warning").length},
@@ -3233,16 +3235,20 @@ VIEWS.delete = (m) => {
   const upd = () => { const sel = r.deletions.filter(d => S.del.has(d.node)); $("#selSum", m).innerHTML = `<b>${fmtN(sel.length)}</b> selected · ${fmtBytes(sel.reduce((a,d)=>a+d.bytes,0))} · <a class="nl" href="#" id="toBuild">go to Build ›</a>`;
     $("#toBuild", m).onclick = () => go("build"); remember(); };
   m.innerHTML = `<h1>Safe to delete</h1><p class="sub">Artefacts nothing in the module reaches - found by following every reference from <span class="mono">module.ifo</span> (areas, objects, events, conversations, includes, tags, variables, 2da, models, textures).</p>
-    <div class="card small"><b>Safe</b> - nothing refers to it at all. <b>Safe as group</b> - only used by other unused files (removed together, the build enforces this). <b>Review</b> - unused, but a warning sign applies (runtime-built names, base-game override, engine naming pattern, whole area).</div>
+    <div class="card small"><b>Safe</b> - nothing refers to it at all. <b>Safe as group</b> - only used by other unused files (removed together, the build enforces this). <b>Review</b> - unused, but a warning sign applies (runtime-built names, base-game override, engine naming pattern, whole area). Review items held back only by reasons that apply to every such item at once (NWNX settings not loaded, haks missing, scripts creating objects from saved names, the DMs' palette, base-game overrides) are <b>likely in use</b> and hidden until you tick <b>show likely in use</b>.</div>
     <div class="row" style="margin-bottom:8px"><span id="selSum" class="grow"></span>${STATIC?"":`<button class="btn" id="sa">Select all Safe</button><button class="btn" id="sn">Clear selection</button>
     <label class="small"><input type="checkbox" id="ar" ${S.allowReview?"checked":""}> allow Review items</label>`}<button class="btn" id="dcsv">Export CSV</button>${STATIC?"":`<button class="btn" id="dimp" title="Load a spreadsheet: fill the delete column (yes / no) of an exported CSV">Import…</button>`}</div>
     <div class="filters" id="fb"></div><div id="t"></div>`;
   const dsets = nameSets(r.deletions.map(d => d.label));
-  const t = new GroupedTable($("#t", m), {rows: r.deletions, onRow: d => openNode(d.node), after: el => bind(el),
+  // Review items held back only by general reasons (NWNX settings, missing haks, saved names, the DMs' palette,
+  // base-game overrides) are likely in use: hidden until "show likely in use" is ticked, so the rest stands out
+  const nGeneral = r.deletions.filter(d => d.status === "Review" && d.general).length;
+  const visible = d => S.delGeneral || !(d.status === "Review" && d.general);
+  const t = new GroupedTable($("#t", m), {rows: r.deletions.filter(visible), onRow: d => openNode(d.node), after: el => bind(el),
     groupings: {"kind": d => d.type, "status": d => d.status, "set (shared name)": d => dsets.get(d.label)},
     badge: rs => { const b = rs.reduce((a, d) => a + d.bytes, 0), n = rs.filter(d => S.del.has(d.node)).length; return `<span class="small muted">${fmtBytes(b)}${n ? ` · ${fmtN(n)} selected` : ""}</span>`; }, columns: [
     {key:"sel", label:"✓", render: d => `<input type="checkbox" data-n="${esc(d.node)}" ${S.del.has(d.node)?"checked":""} ${(d.status==="Review"&&!S.allowReview)||STATIC?"disabled":""}>`, width:"30px"},
-    {key:"status", label:"Status", render: d => stBadge(d.status)},
+    {key:"status", label:"Status", render: d => stBadge(d.status) + (d.status === "Review" && d.general ? `<br><span class="small muted">likely in use</span>` : "")},
     {key:"label", label:"Artefact", render: d => nl(d.node, d.label)}, {key:"type", label:"Kind"},
     {key:"files", label:"Files", render: d => `<span class="mono small">${d.files.map(esc).join("<br>")}</span>`},
     {key:"bytes", label:"Size", num: true, render: d => fmtBytes(d.bytes)},
@@ -3257,12 +3263,19 @@ VIEWS.delete = (m) => {
       changes: p => p.tick.length + p.untick.length,
       apply: async p => { p.tick.forEach(n_ => S.del.add(n_)); p.untick.forEach(n_ => S.del.delete(n_)); t.render(); upd(); }});
   }
-  let dshown = r.deletions;
+  let dshown = r.deletions.filter(visible);
   $("#dcsv", m).onclick = () => downloadCsv("safe_to_delete.csv", ["node", "artefact", "kind", "status", "files", "bytes", "reason", "delete"],
     dshown.map(d => [d.node, d.label, d.type, d.status, d.files.join("; "), d.bytes, [d.reason, d.note].filter(Boolean).join(" - "), S.del.has(d.node) ? "yes" : ""]));
   filterBar($("#fb", m), [{id:"q", type:"search", label:"Search…"}, {id:"s", type:"select", label:"Any status", options:["Safe","Safe as group","Review"]},
     {id:"k", type:"select", label:"Any kind", options:[...new Set(r.deletions.map(d => d.type))]}], f => t.set(dshown = r.deletions.filter(d =>
-      has(f.q, d.label, ...d.files) && (!f.s || d.status === f.s) && (!f.k || d.type === f.k))));
+      visible(d) && has(f.q, d.label, ...d.files) && (!f.s || d.status === f.s) && (!f.k || d.type === f.k))));
+  if (nGeneral){
+    const lab = document.createElement("label"); lab.className = "small";
+    lab.innerHTML = `<input type="checkbox" id="dgen" ${S.delGeneral ? "checked" : ""}> show ${fmtN(nGeneral)} likely in use`;
+    lab.title = "Unused by every reference the analysis can follow, but held back only by reasons that apply to all such items at once (NWNX settings not loaded, haks missing, scripts creating objects from saved names, the DMs' palette, base-game overrides)";
+    $("#fb", m).appendChild(lab);
+    $("#dgen", m).onchange = e => { S.delGeneral = e.target.checked; VIEWS.delete(m); };
+  }
   upd();
 };
 

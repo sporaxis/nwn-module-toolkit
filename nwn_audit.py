@@ -401,7 +401,8 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
         return s_ not in o_sig
     new_issues = [i for i in c_rep["issues"] if i["severity"] in ("error", "warning") and is_new(i)]
     # "not compiled" on a script you edited is reported by edits_compiled below (a WARN), not as a broken reference
-    uncompiled_edits = [i for i in new_issues if i["category"] == "not_compiled" and i["node"] in edited_scripts]
+    # (any severity: a new script nothing uses yet has its "not compiled" lowered to info, but still needs compiling)
+    uncompiled_edits = [i for i in c_rep["issues"] if i["category"] == "not_compiled" and i["node"] in edited_scripts]
     new_issues = [i for i in new_issues if i not in uncompiled_edits]
     new_errors = [i for i in new_issues if i["severity"] == "error"]
     # an edited script whose .ncs was carried over from the original: the game runs the OLD compiled code

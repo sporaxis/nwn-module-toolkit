@@ -345,7 +345,7 @@ The groupings are:
 | Page | Group by |
 |---|---|
 | Overview (highest-impact resources), Impact explorer | why it matters (*Module-wide events* first, then *Touches a quest*, *Reaches 10+ areas*…), module-wide event (OnModLoad, OnClientEnter…), kind, level |
-| Issues | type, severity, where (the area, or module-wide) |
+| Issues | type, severity, where (the area, or module-wide), what's missing (one group per missing script, conversation, blueprint or quest, with every place that names it) |
 | Scripts | set (shared name), role, impact |
 | Items | set (shared resref), base item, where placed (area), impact |
 | Conversations | set (shared name), area or region where the speaker stands, quest giver, used or not |
@@ -367,7 +367,10 @@ Pages with a list and a detail (Factions, Database, Variables & tags, Compare mo
 next to the list; it stays in view while you scroll and ✕ closes it. In a narrow window it opens below the list.
 
 ### 5.1 Overview
-Counts, errors and warnings, impact levels, what the module is made of, and the highest-risk resources. The **Quests**
+Counts, issues, impact levels, what the module is made of, and the highest-risk resources. The **Issues** tile shows
+the errors and warnings together (the same number as the Issues entry in the menu), split underneath; problems that
+only sit in unused content are counted apart as info notes (see 5.2). The **Unused - worth a look** tile counts the
+Review items worth checking; items held back only by general reasons are counted apart as *likely in use* (see 7.1). The **Quests**
 tile counts real quests: those tracked in scripts (tokens, player variables) plus journal quests the scripts use
 (some persistent worlds have no journal at all and track hundreds of quests in scripts). Settings kept by systems like
 DMFI are counted separately, not as quests (see 5.8).
@@ -404,7 +407,13 @@ enabled rather than guess:
 
 ### 5.2 Issues
 Errors and warnings are listed; tick **show info notes** for the informational ones (base-game resources and things to
-know). When there are 20 errors and warnings or fewer they are shown as one list; with more, they are grouped by type
+know). Two kinds of finding are info notes, not errors or warnings, so the real problems stand out:
+- a problem that only sits in content nothing in the module uses (an old conversation naming a missing script, an
+  unplaced creature's missing heartbeat script): its detail ends "only in unused content". It can't happen in play;
+  it goes away when that content is deleted;
+- haks layered on each other: the same model, texture or material in two haks. The first in load order wins, by
+  design (the Hak catalogue shows which). The module's own copy hidden by a hak, the override, and 2da and tileset
+  clashes stay warnings. When there are 20 errors and warnings or fewer they are shown as one list; with more, they are grouped by type
 (use **Group by** to change it). Every issue has a **How to fix** line: the concrete next step (which field, which
 toolset menu, which toolkit page). When the issue may be a false alarm (a hak or the base game not loaded, a name built
 at run time) the first step is to confirm it. The same advice is in `reports/issues.csv` (column *fix*) and in the
@@ -959,6 +968,15 @@ Found by following every reference from `module.ifo`.
   users is Review, this is Review too - decide on the user first.
 - **Review**: probably unused, but something could still reach it at run time. Review items are never deleted unless
   you tick **allow Review items**.
+- **Review, likely in use**: held back only by reasons that hold for every such item at once - the module uses NWNX
+  and no server settings are loaded, a hak was not read, a script creates that kind of object from saved names, the
+  DMs' palette lists it, or it overrides a base-game file. In a persistent world these are usually in use (players
+  carry items for years; DMs spawn from the palette), so they are hidden until you tick **show likely in use**, and the
+  Overview counts them apart.
+
+A script named after an item's tag (tag-based scripting: the game runs `<tag>.nss` when a player uses the item) is in
+use, with everything it leads to (a conversation it opens, the scripts that conversation runs), even when nothing in
+the module places the item: players can carry it.
 
 **Export CSV** saves the candidates shown (node, files, size, status, reason and a `delete` column, "yes" for the ticked
 ones). Go through them in a spreadsheet, put yes or no in `delete`, save as CSV and press **Import…**: the preview shows

@@ -83,6 +83,10 @@ REANALYSE = [
     # merge_rules 2: a blueprint's entry in the custom palette (.itp) no longer holds back merging identical copies
     dict(key="merge_rules", since="1.5.2",
          what="Identical blueprints listed in your custom palette can be merged (Duplicates page)"),
+    # noise_rules 1: item tag scripts in use; problems only in unused content as info; hak layering as info; Review
+    # items held back only by general reasons counted apart as "likely in use"
+    dict(key="noise_rules", since="1.5.2",
+         what="Fewer false alarms: item scripts counted as used, problems in unused content and hak layering as notes"),
 ]
 
 # --- (a) bringing work across -------------------------------------------------------------------------------
