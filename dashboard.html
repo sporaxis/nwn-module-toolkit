@@ -1511,12 +1511,12 @@ function renderQuickScan(r){
   const tile = (v, l, cls = "") => `<div class="tile ${cls}"><div class="v">${v}</div><div class="l">${l}</div></div>`;
   host.innerHTML = `<div class="card">
     <div class="row"><h3 class="grow" style="margin:0">TL;DR - ${esc(m.name || m.path)}</h3><button class="btn" id="qsClose" aria-label="Close quick scan">✕</button></div>
-    <p class="small muted" style="margin:4px 0 10px"><span class="mono">${esc(m.path)}</span> · ${esc(m.kind)} · ${fmtN(m.files)} files, ${fmtBytes(m.bytes)}${m.entry_area ? ` · entry area <span class="mono">${esc(m.entry_area)}</span>` : ""}${m.min_game_version ? ` · needs game ${esc(m.min_game_version)}` : ""}</p>
+    <p class="small muted" style="margin:4px 0 10px"><span class="mono">${esc(m.path)}</span> · ${esc(m.kind)} · ${fmtN(m.files)} files, ${fmtBytes(m.bytes)}${m.bytes_note ? ` (${esc(m.bytes_note)})` : ""}${m.entry_area ? ` · entry area <span class="mono">${esc(m.entry_area)}</span>` : ""}${m.min_game_version ? ` · needs game ${esc(m.min_game_version)}` : ""}</p>
     <div class="tiles">
       ${tile(fmtN(m.areas), "areas")}${tile(fmtN(m.scripts), "scripts")}${tile(fmtN(m.conversations), "conversations")}${tile(fmtN(bp), "blueprints")}
       ${tile(`${r.haks.length}${missing ? ` <span style="color:var(--critical-text);font-size:14px">(${missing} missing)</span>` : ""}`, "haks")}
       ${tile(fmtBytes(sz.player_download), "player download (haks + tlk)")}
-      ${tile("≈ " + esc(a.estimate_text), `full analysis · ${fmtN(a.files)} files, ${fmtBytes(a.bytes)}`)}
+      ${tile("≈ " + esc(a.estimate_text), `full analysis · ${fmtN(a.files)} files, ${fmtBytes(a.bytes)}${m.bytes_note ? " of JSON text" : ""}`)}
     </div>
     <p class="small muted" style="margin-top:0">Time estimate: ${esc(a.basis)}. It is corrected live while the analysis runs, and every finished run makes the next estimate better.</p>
     ${r.warnings.length ? `<h3>Things to know (${r.warnings.length})</h3>` + r.warnings.map(w => `<div class="qs-warn small">${svBadge(w.level || "info")}<span>${esc(w.text)}</span></div>`).join("") : `<p class="small">No warnings.</p>`}

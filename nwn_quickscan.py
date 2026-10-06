@@ -293,6 +293,8 @@ def scan(module_path, haks=(), nwn_root=None, nwn_user=None, workspace=None):
     module = dict(path=os.path.abspath(module_path), kind=("nasher project" if nwn_nasher.is_project(module_path) else "folder") if os.path.isdir(module_path)
                   else ".mod",
                   files=mod["files"], bytes=mod["bytes"], areas=ext_counts.get("are", 0),
+                  # a nasher project's size is its JSON text: the packed module is much smaller (about a quarter)
+                  bytes_note="as JSON text - the packed module is smaller" if plan.get("nasher_sources") else "",
                   scripts=max(scripts_src, scripts_bin), scripts_source=scripts_src, scripts_compiled=scripts_bin,
                   conversations=ext_counts.get("dlg", 0), journal=bool(ext_counts.get("jrl")),
                   blueprints={BP_NAMES[k]: ext_counts[k] for k in BP_NAMES if ext_counts.get(k)},
@@ -468,7 +470,8 @@ def format_text(r):
     m = r["module"]
     out = [f"TL;DR - {m.get('name') or os.path.basename(m['path'])}",
            f"  {m['kind']}: {m['path']}",
-           f"  {m['files']:,} files ({fmt_bytes(m['bytes'])}) - {m['areas']} areas, {m['scripts']} scripts, "
+           f"  {m['files']:,} files ({fmt_bytes(m['bytes'])}{', ' + m['bytes_note'] if m.get('bytes_note') else ''}) - "
+           f"{m['areas']} areas, {m['scripts']} scripts, "
            f"{m['conversations']} conversations, " +
            ", ".join(f"{v} {k}" for k, v in m['blueprints'].items()),
            f"  entry area: {m.get('entry_area') or '?'}   custom tlk: {m.get('custom_tlk') or 'none'}   "
@@ -496,7 +499,7 @@ def format_text(r):
     for x in c["twoda_in_several_haks"][:10]:
         out.append(f"   {x['table']}: {x['wins']} wins over {', '.join(x['hidden'])}")
     s = r["sizes"]
-    out.append(f"\nSizes: module {fmt_bytes(s['module'])}, haks {fmt_bytes(s['haks'])}, tlk {fmt_bytes(s['tlk'])} "
+    out.append(f"\nSizes: module {fmt_bytes(s['module'])}{' (' + m['bytes_note'] + ')' if m.get('bytes_note') else ''}, haks {fmt_bytes(s['haks'])}, tlk {fmt_bytes(s['tlk'])} "
                f"-> player download {fmt_bytes(s['player_download'])}")
     a = r["analysis"]
     out.append(f"Full analysis: {a['files']:,} files / {fmt_bytes(a['bytes'])} to read - roughly {a['estimate_text']} "

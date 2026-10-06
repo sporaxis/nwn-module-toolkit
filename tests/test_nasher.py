@@ -263,6 +263,9 @@ def sources_only(tmp):
           not any("src/bak" in x.replace(os.sep, "/") for x in rels) and
           outside[0] == sum(len(fs) for _d, _s, fs in os.walk(proj)) - len(rels), (outside, rels[:5]))
     q = nwn_quickscan.scan(proj)
+    check("quick scan: a project's size is labelled as JSON text (the packed module is smaller)",
+          q["module"]["bytes_note"].startswith("as JSON text") and "as JSON text" in nwn_quickscan.format_text(q) and
+          not nwn_quickscan.scan(mod)["module"]["bytes_note"], q["module"].get("bytes_note"))
     check("quick scan: says how many files lie outside nasher.cfg's sources",
           any(f"{outside[0]} file(s) outside the sources nasher.cfg packs" in w_["text"] for w_ in q["warnings"]),
           q["warnings"])
