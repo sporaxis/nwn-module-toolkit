@@ -526,7 +526,9 @@ def build(analysis_dir, plan, out_dir=None, name=None, run_audit=True, verbose=T
     plan = validate_plan(plan)
     rep = json.load(open(os.path.join(analysis_dir, "report.json"), encoding="utf-8"))
     db = sqlite3.connect(os.path.join(analysis_dir, "index.sqlite"))
-    module_path = dict(db.execute("SELECT key, value FROM meta").fetchall())["module_path"]
+    meta_ = dict(db.execute("SELECT key, value FROM meta").fetchall())
+    module_path = meta_["module_path"]
+    nasher = meta_.get("module_format") == "nasher json"   # sources only: every script is compiled in step 6
     mod_base = os.path.splitext(os.path.basename(os.path.normpath(module_path)))[0]
     name = name or f"{mod_base}_clean"
     if name.lower() == mod_base.lower():
@@ -791,6 +793,14 @@ def build(analysis_dir, plan, out_dir=None, name=None, run_audit=True, verbose=T
             log["warnings"].append(f"{len(no_source)} script(s) include an edited include but have no .nss source in the "
                                    f"module, so they can't be recompiled and keep their old code: {', '.join(no_source[:8])}")
     to_compile = sorted(set(to_compile) | set(users))
+    if nasher:
+        # a nasher project has no .ncs (nasher compiles when it packs): compile every script with main() or
+        # StartingConditional() that the clean folder has as source but not compiled
+        src_only = sorted(nm for (nm,) in db.execute("SELECT name FROM scripts WHERE has_main = 1 OR has_sc = 1")
+                          if os.path.isfile(os.path.join(target, f"{nm}.nss"))
+                          and not os.path.isfile(os.path.join(target, f"{nm}.ncs")))
+        log["nasher_compile"] = len(src_only)
+        to_compile = sorted(set(to_compile) | set(src_only))
     if to_compile:
         import nwn_compile
         import tempfile
@@ -823,6 +833,10 @@ def build(analysis_dir, plan, out_dir=None, name=None, run_audit=True, verbose=T
                 failed_users = sorted(set(users) - set(cr["written"]))
                 if failed_users:
                     log["include_users_not_compiled"] = failed_users
+            elif nasher:
+                log["warnings"].append(f"nasher project: {len(to_compile)} script(s) not compiled ({cr.get('reason', cr['status'])})"
+                                       " - this .mod would run none of them. Set the official compiler (nwn_script_comp) "
+                                       "in Settings and build again, or use Save as nasher project and nasher pack")
             else:
                 log["warnings"].append(f"{len(to_compile)} edited/new script(s) not compiled: {cr.get('reason', cr['status'])} "
                                        "- compile them in the toolset or install nwn_script_comp")

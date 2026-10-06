@@ -1785,6 +1785,12 @@ def node_details(name, node):
                 jp = os.path.join(d, "json", f"{fl}.json")
                 if os.path.isfile(jp) and os.path.getsize(jp) < 3_000_000:     # bigger ones would stall the page
                     f["json"] = open(jp, encoding="utf-8").read()
+                elif not os.path.isfile(jp) and raw is not None and len(raw) < 1_000_000:
+                    # analysed without the json/ copy (--no-json, or a nasher project): made from the file itself
+                    try:
+                        f["json"] = json.dumps(n.gff_to_json(n.read_gff(raw)), indent=1, ensure_ascii=False)
+                    except n.GffError as ex:
+                        f["json"] = f"(file cannot be read: {ex})"
         elif f["ext"] == "nss" and is_edit:
             out["source"] = n.decode_text(raw)
         if f["ext"] in nwn_edit.TEXT_EXTS - {"nss"} or (f["ext"] == "mdl" and out.get("model", {}).get("format") == "ascii"):

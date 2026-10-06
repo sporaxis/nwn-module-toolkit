@@ -1623,13 +1623,31 @@ class Indexer:
                     stack.append((nxt, iter(inc[nxt]))); path.append(nxt); onpath.add(nxt)
         scripts = {r[0]: (r[1], r[2], r[3]) for r in
                    self.db.execute("SELECT name, has_main, has_sc, has_ncs FROM scripts")}
+        # an area is its .are (size, tiles, events) plus .git (objects) and .gic (comments): a .git or .gic whose .are
+        # is gone is left over from a deleted area - the toolset and game can't load it as an area
+        are = {k[:-4] for k in self.resources if k.endswith(".are")}
+        for nm in sorted({k[:-4] for k in self.resources if k.endswith((".git", ".gic"))} - are):
+            parts = [x for x in ("git", "gic") if f"{nm}.{x}" in self.resources]
+            self.issue("warning", "area_without_are", f"area:{nm}",
+                       f"{' and '.join(nm + '.' + x for x in parts)} but no {nm}.are - left over from a deleted area; "
+                       "the game and toolset can't load it")
         ncs_only = {k[:-4] for k in self.resources if k.endswith(".ncs")} - set(scripts)
         for s in sorted(ncs_only):
             self.issue("warning", "compiled_without_source", f"script:{s}",
                        "Compiled .ncs has no .nss source in the module - cannot be reviewed or rebuilt")
         includes_used = {dst for src, dst, k, v in self.edges if k == "include"}
+        # a nasher project keeps sources only: nasher compiles them when it packs, and so does a build of this analysis
+        # (with the compiler set) - so a missing .ncs is expected there, and noted once instead of per script
+        row = self.db.execute("SELECT value FROM meta WHERE key='module_format'").fetchone()
+        nasher = bool(row and row[0] == "nasher json")
+        uncompiled = [nm for nm, (hm, hs, hn) in scripts.items() if (hm or hs) and not hn]
+        if nasher and uncompiled:
+            self.issue("info", "nasher_not_compiled", "module",
+                       f"nasher project: {len(uncompiled)} script(s) are kept as source only (.nss) - nasher compiles them "
+                       "when it packs the module, and Build & audit compiles them when the official compiler is set in "
+                       "Settings")
         for name, (has_main, has_sc, has_ncs) in scripts.items():
-            if (has_main or has_sc) and not has_ncs:
+            if (has_main or has_sc) and not has_ncs and not nasher:
                 self.issue("warning", "not_compiled", f"script:{name}",
                            "Source has main()/StartingConditional() but no .ncs - will not run until compiled")
             if not has_main and not has_sc and f"script:{name}" not in includes_used:
@@ -1768,7 +1786,7 @@ def default_overrides(nwn_user):
 
 
 def run_index(module_path, haks=(), overrides=None, tlk=None, out=None, write_json=True, verbose=True,
-              nwn_root=None, nwn_user=None, time_budget=None):
+              nwn_root=None, nwn_user=None, time_budget=None, module_format=None):
     """
     Index a module (+haks/overrides) into <out>/index.sqlite.
     time_budget (seconds): stop cleanly when it is spent and write <out>/index.state; calling again with the
@@ -1778,7 +1796,9 @@ def run_index(module_path, haks=(), overrides=None, tlk=None, out=None, write_js
     the NWN hak folders). overrides: override folders; None (the default) = <nwn_user>/override if it has files, [] =
     none (the clean-build audit indexes that way: players don't have the builder's override folder). tlk: custom
     .tlk path. out: analysis folder (default ./nwn_analysis/<module>). nwn_root / nwn_user: game install and user
-    folders (base-game names, dialog.tlk, hak and tlk folders). Order of work: module.ifo is read first for the
+    folders (base-game names, dialog.tlk, hak and tlk folders). module_format: recorded in meta for a module that
+    came from a nasher project ("nasher json" - the audit passes the original's), so scripts kept as source only are
+    judged as in the original. Order of work: module.ifo is read first for the
     custom tlk name, then the module, then the haks it lists, then the overrides, then post_process.
     Never writes outside out; a fresh run (no time_budget, or no index.state) replaces out/index.sqlite.
     """
@@ -1801,6 +1821,7 @@ def run_index(module_path, haks=(), overrides=None, tlk=None, out=None, write_js
         os.makedirs(out, exist_ok=True)
         conv = nwn_nasher.convert(module_path, os.path.join(out, nwn_nasher.CONVERTED))
         module_path = conv["dest"]
+        write_json = False      # the project already holds every GFF file as JSON: no second copy in out/json
     # peek at module.ifo for the custom tlk name so names resolve during indexing
     # (best effort: a damaged module.ifo is reported later, when the module itself is indexed)
     custom_name = ""
@@ -1844,6 +1865,9 @@ def run_index(module_path, haks=(), overrides=None, tlk=None, out=None, write_js
     ix.db.execute("INSERT INTO meta VALUES ('module_path', ?)", (os.path.abspath(module_path),))
     ix.db.execute("INSERT INTO meta VALUES ('indexed_at', ?)", (time.strftime("%Y-%m-%d %H:%M:%S"),))
     ix.db.execute("INSERT INTO meta VALUES ('tlk_custom_name', ?)", (custom_name,))
+    if module_format and not conv:
+        # the audit's index of a clean build made from a nasher project: judged by the same rules as the original
+        ix.db.execute("INSERT INTO meta VALUES ('module_format', ?)", (module_format,))
     if conv:
         ix.db.execute("INSERT INTO meta VALUES ('module_source', ?)", (module_source,))
         ix.db.execute("INSERT INTO meta VALUES ('module_format', 'nasher json')")

@@ -90,6 +90,9 @@ def same_analysis(tmp):
     out = os.path.join(tmp, "an_proj")
     a_proj = h.analyse(proj, out)
     k1, k2 = key(a_mod), key(a_proj)
+    # a project keeps scripts as source (nasher compiles them): its "not compiled" findings differ by design
+    for k_ in (k1, k2):
+        k_["issues"] = [i for i in k_["issues"] if i[1] not in ("not_compiled", "nasher_not_compiled")]
     for part in k1:
         check(f"same analysis: {part}", k1[part] == k2[part],
               lambda part=part: (sorted(set(map(str, k1[part])) ^ set(map(str, k2[part]))) if isinstance(k1[part], list)
@@ -223,9 +226,92 @@ def exporting(tmp):
           'id="bnash"' in page and "/api/build/nasher" in page and "a nasher project folder (JSON files)" in page)
 
 
+def sources_only(tmp):
+    """A real-world nasher layout (feedback: The Frozen North): nasher.cfg packs only src/**/*.{nss,json}; the project
+    also holds base-game script copies, server files and an override folder, and keeps scripts as source only. Only
+    what nasher packs is the module; a missing .ncs is expected (one note, no per-script warnings); a build compiles
+    them (or warns that it couldn't); the audit judges the clean build by the same rules."""
+    import shutil
+    mod = os.path.join(tmp, "plain")
+    make_test_module.build(mod)
+    proj = nasherise(mod, os.path.join(tmp, "proj"))
+    shutil.rmtree(os.path.join(proj, "src", "ncs"))                      # sources only, as nasher keeps them
+    with open(os.path.join(proj, "nasher.cfg"), "w") as fh:               # older nasher layout (TFN): [Sources]
+        fh.write('[Package]\nname = "Test"\n\n[Sources]\ninclude = "src/**/*.{nss,json}"\n\n'
+                 '[Rules]\n"*" = "src/$ext"\n\n[Target]\nname = "mod"\nfile = "testmod.mod"\n')
+    for d, f, data in (("nwn-base-scripts", "nw_c2_default1.nss", b"void main(){}"), ("override", "extra.uti", b"x"),
+                       ("server", "settings.2da", b"2DA V2.0\n"), ("src/bak", "old.bak", b"x")):
+        os.makedirs(os.path.join(proj, d), exist_ok=True)
+        open(os.path.join(proj, d, f), "wb").write(data)
+    # a leftover area instance file whose .are is gone
+    shutil.copy(os.path.join(proj, "src", "git", sorted(os.listdir(os.path.join(proj, "src", "git")))[0]),
+                os.path.join(proj, "src", "git", "gone_area.git.json"))
+    check("cfg: [Sources] include is read; globs: ** any folders, {a,b}, case-insensitive",
+          nwn_nasher.sources(proj)["include"] == ["src/**/*.{nss,json}"] and
+          bool(nwn_nasher._glob_re("src/**/*.{nss,json}").match("src/a/B.NSS")) and
+          not nwn_nasher._glob_re("src/**/*.{nss,json}").match("nwn-base-scripts/a.nss") and
+          bool(nwn_nasher._glob_re("src/**/*.json").match("src/x.json")))
+    check("cfg: newer layout [package.sources] with an exclude list; no cfg = everything",
+          nwn_nasher.sources_from_text('[package]\nname="x"\n[package.sources]\ninclude = ["a/**/*", "b/*.nss"]\n'
+                                       'exclude = [\n  "a/test/*"\n]\n') == (["a/**/*", "b/*.nss"], ["a/test/*"]) and
+          nwn_nasher.sources(tmp)["include"] == ["**"])
+    outside = [0]
+    items, _sk = nwn_nasher.list_resources(proj, outside)
+    rels = [r for *_x, r, _j in items]
+    check("sources: only what nasher packs (no base-game copies, override, server files or .bak)",
+          all(x.replace(os.sep, "/").startswith("src/") and x.endswith((".nss", ".json")) for x in rels) and
+          not any("src/bak" in x.replace(os.sep, "/") for x in rels) and
+          outside[0] == sum(len(fs) for _d, _s, fs in os.walk(proj)) - len(rels), (outside, rels[:5]))
+    q = nwn_quickscan.scan(proj)
+    check("quick scan: says how many files lie outside nasher.cfg's sources",
+          any(f"{outside[0]} file(s) outside the sources nasher.cfg packs" in w_["text"] for w_ in q["warnings"]),
+          q["warnings"])
+    out = os.path.join(tmp, "an")
+    rep = h.analyse(proj, out)
+    cats = [i["category"] for i in rep["issues"]]
+    check("compile: no per-script 'not compiled' warning; one note that nasher compiles them",
+          "not_compiled" not in cats and cats.count("nasher_not_compiled") == 1, sorted(set(cats)))
+    check("compile: scripts count as compiled (keepers, merges)", all(s_["compiled"] for s_ in rep["scripts"]
+                                                                      if "library" not in s_["role"]),
+          [(s_["name"], s_["role"]) for s_ in rep["scripts"] if not s_["compiled"]])
+    check("json: no second JSON copy of the project in the analysis", not os.path.exists(os.path.join(out, "json")))
+    gone = [i for i in rep["issues"] if i["category"] == "area_without_are"]
+    check("area: a .git whose .are is gone is a warning naming it", len(gone) == 1 and gone[0]["node"] == "area:gone_area"
+          and "gone_area.git" in gone[0]["detail"], gone)
+    # build without a compiler: warned that the .mod would run no scripts; the audit raises no new warnings
+    log = nwn_build.build(out, dict(delete=[], merge=[]), name="src_clean", verbose=False,
+                          audit_kwargs=dict(compiler=h.NO_COMPILER))
+    check("build, no compiler: a warning that the .mod would run none of the scripts",
+          any(w_.startswith("nasher project:") and "would run none" in w_ for w_ in log["warnings"]), log["warnings"])
+    st = {c["id"]: c["status"] for c in log["audit"]["checks"]}
+    check("audit: judged by the same rules (no NEW 'not compiled' warnings)", st.get("references") == "PASS", st)
+    # with a compiler: every source-only script is compiled into the clean folder
+    comp = h.fake_compiler(os.path.join(tmp, "comp"))
+    log2 = nwn_build.build(out, dict(delete=[], merge=[]), name="src_clean2", verbose=False,
+                           audit_kwargs=dict(compiler=comp))
+    clean = os.path.join(out, "build", "src_clean2")
+    mains = [s_["name"] for s_ in rep["scripts"] if "library" not in s_["role"]]
+    check("build, compiler set: every script is compiled into the clean module",
+          log2.get("nasher_compile") == len(mains) and
+          all(os.path.isfile(os.path.join(clean, m_ + ".ncs")) for m_ in mains),
+          (log2.get("nasher_compile"), len(mains), [m_ for m_ in mains if not os.path.isfile(os.path.join(clean, m_ + ".ncs"))][:5],
+           log2["warnings"][:3]))
+    # the detail panel shows a GFF file's JSON, made from the file itself (no json/ copy)
+    name = "nash_src"
+    shutil.copytree(out, os.path.join(D.WORKSPACE, name))
+    det = D.GET_ROUTES["/api/node"]({"a": name, "node": "bp:" + sorted(f for f in os.listdir(os.path.join(proj, "src", "uti")))[0][:-5]}) \
+        if "/api/node" in D.GET_ROUTES else None
+    if det is None:
+        h.skip("detail: a GFF file's JSON without the json/ copy", "no /api/node route")
+    else:
+        fj = [f.get("json") for f in det.get("files", [])]
+        check("detail: a GFF file's JSON is shown without the json/ copy",
+              fj and fj[0] and fj[0].lstrip().startswith("{"), str(det)[:300])
+
+
 def main():
     """Run every group of checks; returns the exit code (tests/_harness.summary)."""
-    for fn in (recognise, same_analysis, problems, exporting):
+    for fn in (recognise, same_analysis, problems, exporting, sources_only):
         with h.tempdir() as t:
             h.run(fn, t)
     return h.summary()

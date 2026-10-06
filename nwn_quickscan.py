@@ -59,7 +59,7 @@ BP_NAMES = {"uti": "items", "utc": "creatures", "utp": "placeables", "utd": "doo
 
 
 # ------------------------------------------------------------------ file lists (names + sizes only)
-def list_module(module_path):
+def list_module(module_path, info=None):
     """[(resref, ext, size)], skipped non-game files, ifo root (or None), error text.
 
     module_path: an unpacked module folder (walked as nwnlib.walk_folder: hidden folders such as .git and symbolic
@@ -69,7 +69,10 @@ def list_module(module_path):
     items, skipped, root, err = [], [], None, None
     if nwn_nasher.is_project(module_path):
         # a nasher project: GFF files as <name>.<ext>.json, listed under the game names they become
-        res, skipped = nwn_nasher.list_resources(module_path)
+        outside = [0]
+        res, skipped = nwn_nasher.list_resources(module_path, outside)
+        if info is not None:
+            info.update(nasher_outside=outside[0], nasher_sources=nwn_nasher.sources(module_path))
         items = [(r, e, size) for r, e, size, _rel, _j in res]
         try:
             root = nwn_nasher.read_ifo(module_path)
@@ -165,7 +168,8 @@ def plan_sources(module_path, explicit_haks=(), overrides=None, nwn_root=None, n
     `units` are nwn_progress.cost() sums. A hak that can't be read becomes a source with `error` and 0 units
     rather than an exception. Read-only.
     """
-    items, skipped, root, err = list_module(module_path)
+    linfo = {}
+    items, skipped, root, err = list_module(module_path, linfo)
     hak_names = ifo_haks(root)
     dirs = nwn_index.default_hak_dirs(nwn_root, nwn_user)
     found, missing = nwn_index.find_haks(hak_names, list(explicit_haks), dirs)
@@ -206,7 +210,7 @@ def plan_sources(module_path, explicit_haks=(), overrides=None, nwn_root=None, n
         sources.append(dict(path=os.path.abspath(o), kind="override", name="override", files=len(ents),
                             bytes=sum(s for _, _, s in ents), units=sum(nwn_progress.cost(e, s) for _, e, s in ents), items=ents))
     return dict(sources=sources, hak_names=hak_names, hak_paths=hak_paths, haks_found=found, haks_missing=missing, ifo=root,
-                module_error=err, skipped=skipped,
+                module_error=err, skipped=skipped, **linfo,
                 units=sum(s["units"] for s in sources), files=sum(s["files"] for s in sources),
                 bytes=sum(s["bytes"] for s in sources))
 
@@ -278,6 +282,10 @@ def scan(module_path, haks=(), nwn_root=None, nwn_user=None, workspace=None):
     if long_names:
         warnings.append(dict(level="error", text=f"{len(long_names)} module file(s) have names over 16 characters "
                              f"and cannot load: {', '.join(long_names[:5])}{' …' if len(long_names) > 5 else ''}"))
+    if plan.get("nasher_outside"):
+        warnings.append(dict(level="info", text=f"nasher project: {plan['nasher_outside']} file(s) outside the sources "
+                             f"nasher.cfg packs ({', '.join(plan['nasher_sources']['include'])}) are not part of the "
+                             "module and are not read"))
     if plan["skipped"]:
         warnings.append(dict(level="info", text=f"{len(plan['skipped'])} non-game file(s) in the module folder are ignored "
                              f"(e.g. {', '.join(plan['skipped'][:3])})"))

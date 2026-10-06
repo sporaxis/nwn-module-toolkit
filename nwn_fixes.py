@@ -243,6 +243,12 @@ FIXES = {
                                 "that counted by the old labels."),
     "symlink_skipped": lambda i: ("Copy the real files into the module folder if they belong to it; links are never "
                                   "followed."),
+    "area_without_are": lambda i: ("Delete the leftover .git/.gic files (Safe to delete lists the area as Review: "
+                                   "tick it there, or remove them from the module folder / nasher project), unless you "
+                                   "meant to keep the area - then restore its .are from a backup."),
+    "nasher_not_compiled": lambda i: ("Nothing to fix: nasher compiles the scripts when it packs. For a clean .mod "
+                                      "from Build & audit, set the official compiler (nwn_script_comp) in Settings - "
+                                      "the build then compiles them - or use Save as nasher project and nasher pack."),
     "json_unreadable": lambda i: ("Open the file named above in your nasher project and fix it (or unpack that "
                                   "resource again with nasher), then press Analyse again. Until then the analysis "
                                   "and any build leave it out."),

@@ -181,7 +181,8 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
     # overrides=[]: the builder's own override folder is left out - players don't have it, so a check that passes
     # only because a file sits there (a 2da or texture a lean hak dropped) would hide a broken build
     nwn_index.run_index(clean_folder, haks=haks, overrides=[], tlk=ometa.get("tlk") or None, out=clean_dir,
-                        write_json=False, verbose=False, nwn_root=nwn_root, nwn_user=nwn_user)
+                        write_json=False, verbose=False, nwn_root=nwn_root, nwn_user=nwn_user,
+                        module_format=ometa.get("module_format"))
     nwn_analysis.run_analysis(clean_dir, verbose=False)
     import nwn_progress
     nwn_progress.emit(phase="checks", stage="comparing the clean module with the original")

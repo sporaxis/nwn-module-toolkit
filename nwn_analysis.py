@@ -853,6 +853,7 @@ def run_analysis(out_dir, verbose=True):
     db = sqlite3.connect(index_path)
     g = Graph(db)
     meta = dict(db.execute("SELECT key, value FROM meta").fetchall())
+    nasher = meta.get("module_format") == "nasher json"      # scripts as source only (nwn_nasher)
     files = [dict(zip(("id", "source", "relpath", "resref", "ext", "kind", "size", "sha256", "content_hash",
                        "status", "error", "node"), r))
              for r in db.execute("SELECT f.id, s.kind, f.relpath, f.resref, f.ext, f.kind, f.size, f.sha256, "
@@ -1048,7 +1049,8 @@ def run_analysis(out_dir, verbose=True):
                                          [f for f in (defined or "").split(",") if f],
                                          missing_inc=[f"{fn}() from '{lib}' (NOT included)" for fn, lib in missing_inc])
         scripts.append(dict(node=nid, name=name, role=d["role"], summary=d["summary"], details=d["details"],
-                            description=descriptions_override.get(name), lines=lines, compiled=bool(has_ncs),
+                            description=descriptions_override.get(name), lines=lines,
+                            compiled=bool(has_ncs) or (nasher and bool(has_main or has_sc)),
                             functions=defined.split(",") if defined else [],
                             includes=[d_[7:] for d_, k, v in g.fwd.get(nid, []) if k == "include"],
                             triggers=[dict(kind=k, by=lab, via=v) for k, lab, v in triggers],
@@ -1141,6 +1143,8 @@ def run_analysis(out_dir, verbose=True):
         return len([1 for s, k, v in g.rev.get(nid, []) if k not in ("tag_provider",)])
 
     compiled = {f["resref"] for f in module_files if f["ext"] == "ncs"}
+    if nasher:   # a nasher project keeps sources only; nasher (and a build) compile them - see nwn_index.validate
+        compiled |= {s_["name"] for s_ in scripts if s_["compiled"]}
     stub_cache = {}
 
     def is_stub(script_name):

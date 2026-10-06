@@ -85,13 +85,118 @@ def is_project(path):
         return False
 
 
-def list_resources(path):
+# ---------------------------------------------------------------------------------------------- nasher.cfg sources
+# nasher packs only the files its nasher.cfg names ([Sources] / [package.sources] include and exclude globs, or a
+# target's own sources). A project folder usually holds much more - base-game script copies, server files, tools - so
+# the same files are read here as nasher would pack. Only the part of nasher.cfg needed for that is read.
+
+def _cfg_values(text):
+    """{section: {key: [values]}} from nasher.cfg text (TOML subset: [section] / [[section]] headers, key = "string"
+    or key = ["a", "b"] arrays, possibly over several lines; # comments). Section and key names lower case; the
+    first of a repeated section (several targets) is kept as "<name>", the others as "<name>#2" ... Never raises."""
+    import re
+    out, sec, seen = {}, "", {}
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"^\[\[?\s*([^\]]+?)\s*\]\]?$", line)
+        if m:
+            name = m.group(1).lower()
+            seen[name] = seen.get(name, 0) + 1
+            sec = name if seen[name] == 1 else f"{name}#{seen[name]}"
+            out.setdefault(sec, {})
+            continue
+        m = re.match(r'^("?)([A-Za-z0-9_.-]+)\1\s*=\s*(.*)$', line)
+        if not m:
+            continue
+        key, val = m.group(2).lower(), m.group(3)
+        while val.count("[") > val.count("]") and i < len(lines):    # an array over several lines
+            val += " " + lines[i].strip()
+            i += 1
+        out.setdefault(sec, {})[key] = re.findall(r'"((?:[^"\\]|\\.)*)"', val) or [val.strip()]
+    return out
+
+
+def _glob_re(pattern):
+    """A compiled regex for one nasher glob over a relative path with "/" separators: ** any folders (also none),
+    * and ? within one name, {a,b} alternatives, [..] character sets. Case-insensitive (Windows projects)."""
+    import re
+    p, i, out = pattern.replace("\\", "/").lstrip("./"), 0, ""
+    while i < len(p):
+        c = p[i]
+        if p.startswith("**/", i):
+            out += "(?:.*/)?"
+            i += 3
+            continue
+        if p.startswith("**", i):
+            out += ".*"
+            i += 2
+            continue
+        if c == "*":
+            out += "[^/]*"
+        elif c == "?":
+            out += "[^/]"
+        elif c == "{":
+            j = p.find("}", i)
+            if j < 0:
+                out += re.escape(c)
+            else:
+                out += "(?:" + "|".join(re.escape(x) for x in p[i + 1:j].split(",")) + ")"
+                i = j
+        elif c == "[":
+            j = p.find("]", i)
+            out += p[i:j + 1] if j > i else re.escape(c)
+            i = j if j > i else i
+        else:
+            out += re.escape(c)
+        i += 1
+    return re.compile("^" + out + "$", re.I)
+
+
+def sources_from_text(text):
+    """(include, exclude) globs from nasher.cfg text, as sources() reads them; (["**"], []) when it names none."""
+    secs = _cfg_values(text)
+    for name in ("target.sources", "target", "package.sources", "sources", "package"):
+        inc = secs.get(name, {}).get("include")
+        if inc:
+            return inc, secs[name].get("exclude", [])
+    return ["**"], []
+
+
+def sources(path):
+    """What nasher would pack from the project at `path`: dict(cfg, include [globs], exclude [globs]) from its
+    nasher.cfg - the first target's own sources when it has them, else the package's ([Sources] in older nasher,
+    [package.sources] in newer). cfg is None and include ["**"] (everything) when there is no nasher.cfg or it names
+    no sources. Never raises."""
+    try:
+        with open(os.path.join(path, "nasher.cfg"), encoding="utf-8", errors="replace") as fh:
+            inc, exc = sources_from_text(fh.read())
+    except OSError:
+        return dict(cfg=None, include=["**"], exclude=[])
+    return dict(cfg="nasher.cfg", include=inc, exclude=exc)
+
+
+def list_resources(path, outside=None):
     """(items, skipped) for a nasher project folder. items: [(resref, ext, size, relpath, is_json)] sorted by
     relpath (the first copy of a name wins when the project holds the same name twice, as in convert()); skipped:
-    relpaths of files that are not game resources (nasher.cfg, README ...). Sizes are the files' own (JSON text is
-    larger than the binary it becomes). Names only: no file is opened."""
+    relpaths of files nasher.cfg's sources take in that are not game resources. Files outside those sources (base-game
+    script copies, server and tool files ...) are not resources of the module: their count is added to outside[0]
+    when a one-item list is given. Sizes are the files' own (JSON text is larger than the binary it becomes). Names
+    only: no file is opened."""
+    src = sources(path)
+    inc = [_glob_re(g) for g in src["include"]]
+    exc = [_glob_re(g) for g in src["exclude"]]
     items, skipped = [], []
     for full, rel in sorted(n.walk_folder(path), key=lambda x: x[1]):
+        relp = rel.replace(os.sep, "/")
+        if not any(r.match(relp) for r in inc) or any(r.match(relp) for r in exc):
+            if outside is not None:
+                outside[0] += 1
+            continue
         r = resource_name(os.path.basename(full))
         if r is None:
             skipped.append(rel)

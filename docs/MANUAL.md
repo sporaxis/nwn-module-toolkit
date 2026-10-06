@@ -193,10 +193,16 @@ Type or paste the path, or use **Browse…**. You can point it at:
 
 **nasher projects.** The toolkit converts the JSON files into an ordinary module folder inside the analysis folder
 (`module_from_json/`) and analyses that copy: each `<name>.<ext>.json` becomes the binary file, `.nss`, `.2da` and
-other game files are copied, and everything else (`nasher.cfg`, READMEs) is left out. Your project is only read. The
-Overview names the project; **Analyse again** converts it afresh, so changes you made since show up. A build gives a
-normal module folder and `.mod`, as `nasher pack` would. A JSON file that can't be read, or the same name in two
-folders, is listed under Issues with how to fix it. The converted copy takes about as much disk space as the module.
+other game files are copied. Only the files `nasher.cfg` packs are read (its `[Sources]` / `[package.sources]`
+include and exclude patterns, e.g. `src/**/*.{nss,json}`), so base-game script copies, server files and tools kept in
+the same repository are not mistaken for module content; the quick scan says how many files it left out. Your project
+is only read. The Overview names the project; **Analyse again** converts it afresh, so changes you made since show up.
+nasher keeps scripts as source and compiles them when it packs, so a missing `.ncs` is expected: one note says so
+instead of a warning per script. **Build & audit** gives a normal module folder and `.mod` and compiles every script
+into it when the official compiler is set in Settings; without one it warns that the `.mod` would run none of them
+(use **Save as nasher project** and `nasher pack` instead). A JSON file that can't be read, or the same name in two
+folders, is listed under Issues with how to fix it. The converted copy takes about as much disk space as the packed
+module; no second JSON copy is kept (the detail panel shows a file's JSON from the file itself).
 
 Under **Optional** you can add hak files by hand (one per line), a talk table and an analysis name. Usually you
 need none of these: haks and the custom talk table are found from `module.ifo` and your NWN folders.
@@ -1169,7 +1175,7 @@ toolkit folder/
       compile.json         the last Validate all with official compiler
       reports/*.csv        issues, scripts, items, duplicates, safe_to_delete, impact, quest_health, orphans, palette, ...
       conversations/       readable dialogue trees
-      json/                every GFF file as JSON (skipped with --no-json)
+      json/                every GFF file as JSON (skipped with --no-json, and for nasher projects)
       palette_moves.json   YOUR waiting palette moves (Blueprints page; applied by the next build)
       edits/               YOUR edits (kept unless you delete them on purpose)
         .history/          what each Find & replace changed (for Undo), and discarded edits

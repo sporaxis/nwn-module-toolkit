@@ -2473,8 +2473,9 @@ function tokensTab(host, va){
 }
 
 // ---------------------------------------------------------------- find everywhere + rename / replace
-// a duplicate member's file name (its resref): bp:sword_b.uti -> sword_b.uti, script:x -> x; "" for other nodes
-const dupFile = node => /^(bp|script|dlg|asset):/.test(node) ? node.slice(node.indexOf(":") + 1) : "";
+// a duplicate member's file name (its resref): bp:sword_b.uti -> sword_b.uti, script:x -> x.nss, dlg:x -> x.dlg
+const dupFile = node => /^(bp|asset):/.test(node) ? node.slice(node.indexOf(":") + 1)
+  : /^script:/.test(node) ? node.slice(7) + ".nss" : /^dlg:/.test(node) ? node.slice(4) + ".dlg" : "";
 // how a duplicate differs from its keeper -> colour; dupChips shows the differences as chips
 const DCL = {look: "critical", name: "warning", tag: "warning", stats: "serious", scripts: "serious", inventory: "neutral", variables: "neutral", other: "neutral"};
 const dupChips = d => d.total ? `<span class="small muted">differs from keeper:</span> ${Object.entries(d.counts).map(([k, v]) => `<span class="chip" title="${esc(d.examples.filter(x => x.cls === k).map(x => x.path + ": " + (x.a ?? "-") + " → " + (x.b ?? "-")).join("\n"))}" style="border-color:var(--${DCL[k]||"neutral"})">${esc(k)} ${v}</span>`).join(" ")}` : `<span class="small muted">identical apart from its name</span>`;
