@@ -13,7 +13,7 @@ Analyse, understand and clean up Neverwinter Nights: Enhanced Edition modules - 
 Runs on Windows, macOS and Linux.
 
 ## Why I made this
-By day I work in cyber security risk. In my own time I tinker with Neverwinter Nights, and I'm part of the community behind Mystara: Black Horizon, a large persistent world where I look after the server, keeping it up and keeping it secure.
+By day I work in cyber security risk. In my own time I tinker with Neverwinter Nights, and I'm part of the community behind Mystara: Alternate, a large persistent world where I look after the server, keeping it up and keeping it secure.
 
 NWN time is hard to find around work, family and sport, so I don't build this in big sessions. I fit it in here and there. But I'm still very much invested in the game and the people who play it.
 
