@@ -1738,9 +1738,12 @@ ${(d.configs || []).map(c => `<span class="chip">${esc(c.name)} · ${esc(c.kind)
 const openIssues = (r, sev) => r.issues ? r.issues.filter(i => i.severity === sev && !isAccepted(i)).length : (r.summary.issues[sev]||0);
 const accCount = r => (r.issues || []).filter(isAccepted).length;
 const issueKey = i => `${i.category}|${i.node}|${i.label}`;
-const issueSig = i => String(i.detail || "").replace(/\d+/g, "#");
-function isAccepted(i){ const a = (S.accepted || {})[issueKey(i)]; return !!a && a.sig === issueSig(i); }
-function acceptedChanged(i){ const a = (S.accepted || {})[issueKey(i)]; return !!a && a.sig !== issueSig(i); }
+// the signature stops at "; used by ": accepting a missing script covers every object that names it, even ones added
+// later (nwn_sheets.issue_sig); a signature stored before that rule is cut the same way, so it still matches
+const sigCore = s => String(s || "").split("; used by ")[0];
+const issueSig = i => sigCore(i.detail).replace(/\d+/g, "#");
+function isAccepted(i){ const a = (S.accepted || {})[issueKey(i)]; return !!a && sigCore(a.sig) === issueSig(i); }
+function acceptedChanged(i){ const a = (S.accepted || {})[issueKey(i)]; return !!a && sigCore(a.sig) !== issueSig(i); }
 // Import… on the Issues, Safe to delete and Duplicates pages: pick a CSV, show the server's preview (each row is
 // changed, unchanged or refused with its row number and why) and apply only after OK. url: the upload endpoint (a
 // preview); lines(plan): the "will change" lines; changes(plan): how many changes; apply(plan, file): do it.
@@ -1784,7 +1787,7 @@ VIEWS.issues = (m) => {
     {key:"severity", label:"Severity", render: i => svBadge(i.severity), sort: i => ["error","warning","info"].indexOf(i.severity)},
     {key:"category", label:"Type", render: i => `<span class="small">${esc(i.category.replace(/_/g," "))}</span>`},
     {key:"label", label:"Where", render: i => nl(i.node, i.label)},
-    {key:"detail", label:"Detail", render: i => `<span class="small">${esc(i.detail)}</span>${i.fix ? `<div class="small fixhint"><b>How to fix:</b> ${esc(i.fix)}</div>` : ""}${acceptedChanged(i) ? `<br><span class="badge sv-warning"><i></i>changed since you accepted it</span> <span class="small muted">${esc((S.accepted[issueKey(i)]||{}).note||"")}</span>` : ""}`},
+    {key:"detail", label:"Detail", render: i => `<span class="small">${esc(i.detail)}</span>${(i.places||[]).length > 1 ? `<details class="small"><summary>All ${i.places.length} places</summary><ul>${i.places.map(p => `<li>${esc(p)}</li>`).join("")}</ul></details>` : ""}${i.fix ? `<div class="small fixhint"><b>How to fix:</b> ${esc(i.fix)}</div>` : ""}${acceptedChanged(i) ? `<br><span class="badge sv-warning"><i></i>changed since you accepted it</span> <span class="small muted">${esc((S.accepted[issueKey(i)]||{}).note||"")}</span>` : ""}`},
     {key:"acc", label:"By design", sort: i => isAccepted(i) ? 1 : 0, render: i => STATIC ? (isAccepted(i) ? "yes" : "") :
       `<label class="small" title="Accept this issue as intended"><input type="checkbox" data-acc="${esc(issueKey(i))}" ${isAccepted(i)?"checked":""}> ${isAccepted(i) ? esc(S.accepted[issueKey(i)].note || "accepted") : ""}</label>`}]});
   // info notes and accepted issues are hidden unless their tick box is on (or the info severity is picked)

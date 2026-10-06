@@ -270,6 +270,17 @@ def tricky_tests(tmp, root):
     check("stale .mod replaced by this build", open(log["mod_file"], "rb").read(4) == b"MOD ")
     bad = [c for c in log["audit"]["checks"] if c["status"] not in ("PASS", "SKIPPED")]
     check("tricky build audit passes", not bad, bad)
+    # the analysis given as a path relative to the current folder: the git commit's message file must still be found
+    # (git runs inside the clean folder; a relative path failed there - found building a nasher project, 1.5.2)
+    if log.get("git", {}).get("commit"):
+        here = os.getcwd()
+        try:
+            os.chdir(os.path.dirname(out))
+            rel = nwn_build.build(os.path.basename(out), plan, verbose=False, run_audit=False)
+        finally:
+            os.chdir(here)
+        check("build: an analysis path relative to the current folder still commits to git",
+              rel.get("git", {}).get("commit") and rel["git"]["commit"] != log["git"]["commit"], rel.get("git"))
 
     # unsafe names inside a .mod are neutralised (no writing outside the build folder)
     evil = os.path.join(tmp, "evil.mod")

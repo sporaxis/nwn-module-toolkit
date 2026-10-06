@@ -123,14 +123,16 @@ older version's Build page says so instead of building without them, and refuses
 - **NWN install folder**: the folder with `data` and `lang` in it. It gives exact base-game checks ("this script or
   head model ships with the game"). Press **Detect** to look in the usual places (the
   `NWN_ROOT` environment variable, the default Steam library, the Beamdog Client). When one is found, the empty box
-  says so, and **Detect** fills it in. GOG installs and Steam libraries on other drives are not searched: type or
-  paste those. Examples:
+  says so, and **Detect** fills it in. While the box is empty, an analysis uses the first install found in those
+  places; with none found, the base game is not read and the Overview says so. GOG installs and Steam libraries on
+  other drives are not searched: type or paste those. Examples:
   - Windows (Steam): `C:\Program Files (x86)\Steam\steamapps\common\Neverwinter Nights`
   - macOS (Steam): `~/Library/Application Support/Steam/steamapps/common/Neverwinter Nights`
   - Linux (Steam): `~/.local/share/Steam/steamapps/common/Neverwinter Nights`
 - **NWN user folder**: `Documents/Neverwinter Nights` on Windows and macOS, `~/.local/share/Neverwinter Nights` on Linux.
   It holds `modules`, `hak`, `tlk`, `override`, `database` and `logs`. Haks, the custom talk table and the override
-  folder are found here automatically.
+  folder are found here automatically. When `nwn.ini` there (or in the install folder) moves the hak, tlk or modules
+  folder in its `[Alias]` section (`HAK=D:\NeverwinterNights\NWN\hak`), those folders are searched first.
 - **Compiler path** (optional): leave it empty when the compiler is in the toolkit's `tools` folder (see 2.2). The
   line above the boxes says whether it was found.
 - **Log folders**: where the Log monitor looks. The label shows the folders it uses when you leave this empty.
@@ -407,16 +409,30 @@ enabled rather than guess:
 
 ### 5.2 Issues
 Errors and warnings are listed; tick **show info notes** for the informational ones (base-game resources and things to
-know). Two kinds of finding are info notes, not errors or warnings, so the real problems stand out:
+know). These findings are info notes, not errors or warnings, so the real problems stand out:
 - a problem that only sits in content nothing in the module uses (an old conversation naming a missing script, an
   unplaced creature's missing heartbeat script): its detail ends "only in unused content". It can't happen in play;
   it goes away when that content is deleted;
 - haks layered on each other: the same model, texture or material in two haks. The first in load order wins, by
   design (the Hak catalogue shows which). The module's own copy hidden by a hak, the override, and 2da and tileset
-  clashes stay warnings.
+  clashes stay warnings;
+- a script missing only where that does no harm: on static placeables (the game never creates them as objects, so
+  their scripts never run) or in a creature's OnConversation (a name that doesn't exist is a known way to stop an NPC
+  speaking or turning to the player). Missing in any other slot, it stays an error;
+- a condition script (`int StartingConditional()`) in a conversation's action slot or an event slot: it runs, and
+  what it returns is ignored. (An action script in a condition slot stays an error.)
+- a heavy heartbeat script run only by creatures: it runs only while such a creature exists, and more slowly in
+  areas with no players.
+
+A variable read as one type but set only as another (`GetLocalString` of a name only ever set with
+`SetLocalObject`) says where it is set - a script line, or a blueprint's or placed object's Variables - and where it
+is read; NWN keeps each type a separate variable even with the same name. If you reuse the name on purpose, tick
+**By design**. A tag looked up with other capitals than the object has names the objects that carry it, and says so
+when the name looked up is a blueprint's resref (lookups use the tag, never the resref). Both are info notes when
+some haks were not loaded. **All N places** under an issue's detail lists every slot, read or set it is about.
 
 A missing script is **one issue per script**, not one per event slot: its detail says how many places name it and
-lists the first ones (*object: slot*), and clicking it shows every place. Creating the script fixes them all at once;
+lists the first ones (*object: slot*), and **All N places** under it lists every one. Creating the script fixes them all at once;
 otherwise clear or correct each slot. (Issues you accepted as by design before this change was made show again once,
 because they are now keyed by the script.) When there are 20 errors and warnings or fewer they are shown as one list; with more, they are grouped by type
 (use **Group by** to change it). Every issue has a **How to fix** line: the concrete next step (which field, which
@@ -427,7 +443,9 @@ to fix* lines.
 
 Some issues are by design. Tick **By design** on an issue and add a note (for example "set by the DM tool at run
 time"). It is hidden (tick *show accepted* to see it again), left out of the counts on the menu and the Overview, and
-stays accepted when you re-analyse. If what the issue says changes, it comes back with *changed since you accepted it*.
+stays accepted when you re-analyse. If what the issue says changes, it comes back with *changed since you accepted it*
+- except the list of places after "used by": accepting a missing script covers every object that names it, also
+ones you add later.
 Accepted issues are kept in `accepted_issues.json` in the analysis folder, as your work.
 
 Many at once: narrow the list with the search and filters, then **Accept all shown (N)…** (one note for all of them);

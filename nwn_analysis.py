@@ -546,16 +546,48 @@ def missing_script_issues(db, g, not_loaded_hint=""):
     fix, not 22 problems: a big old module had 2,955 such rows for 900 scripts. The issue's node is the missing script
     (script:<name>; its detail panel lists every user), its detail names the script, then says how many places name
     it and lists the first ones ("<object>: <field>"); places carries them all. Read-only."""
+    # Two kinds of slot where a missing script does no harm (a tester's report on 1.5.1):
+    #  - a static placeable: the game bakes it into the area and never creates it as an object, so none of its
+    #    scripts (heartbeat included) ever run;
+    #  - a creature's OnConversation (ScriptDialogue): naming a script that doesn't exist is a known builder's trick -
+    #    the NPC then neither speaks nor turns to the player when clicked.
+    # A script missing only in such slots is an info note; one missing in any other slot stays an error.
+    obj = {}
+    try:
+        for node_, fid, path_, cls in db.execute("SELECT node, file_id, path, class FROM objects"):
+            obj[node_] = (fid, path_ or "", cls)
+        static = {(fid, path_.rsplit("/", 1)[0] if "/" in path_ else "")
+                  for fid, path_ in db.execute("SELECT file_id, path FROM fields WHERE label='Static' AND value='1'")}
+    except sqlite3.Error:
+        static = set()
+
+    def harmless(node_, field):
+        """Why a missing script in this slot never matters ('' when it may): see above."""
+        fid, path_, cls = obj.get(node_, (None, "", ""))
+        if cls == "placeable" and (fid, path_) in static:
+            return "static placeable"
+        if cls == "creature" and field.rsplit("/", 1)[-1] == "ScriptDialogue":
+            return "OnConversation"
+        return ""
     by_name = defaultdict(list)
+    quiet = defaultdict(int)
     for _s, _c, n_, d in db.execute("SELECT * FROM issues WHERE category='missing_script'"):
         m = re.match(r"(.*?) -> '([^']+)' not found", d)
         if m:
-            by_name[m.group(2).lower()].append(f"{g.label(n_)}: {m.group(1)}")
+            why = harmless(n_, m.group(1))
+            by_name[m.group(2).lower()].append(f"{g.label(n_)}: {m.group(1)}" + (f" ({why})" if why else ""))
+            quiet[m.group(2).lower()] += bool(why)
     out = []
     for name, places in sorted(by_name.items()):
+        listed = f"used by {len(places)} place(s): {'; '.join(places[:6])}{' …' if len(places) > 6 else ''}"
+        if quiet[name] == len(places):
+            out.append(dict(severity="info", category="missing_script", node=f"script:{name}", label=name,
+                            detail=f"Script '{name}' not found in module, named only where that does no harm - static "
+                                   "placeables run no scripts, and a missing OnConversation script is a known way to "
+                                   f"stop an NPC speaking or turning to the player; {listed}", places=places[:200]))
+            continue
         out.append(dict(severity="error", category="missing_script", node=f"script:{name}", label=name,
-                        detail=f"Script '{name}' not found in module{not_loaded_hint}; used by {len(places)} "
-                               f"place(s): {'; '.join(places[:6])}{' …' if len(places) > 6 else ''}",
+                        detail=f"Script '{name}' not found in module{not_loaded_hint}; {listed}",
                         places=places[:200]))
     return out
 
@@ -2045,7 +2077,7 @@ def run_analysis(out_dir, verbose=True):
     try:
         import nwn_varaudit
         var_audit = nwn_varaudit.run(db, g)
-        for li in nwn_varaudit.issues_from(var_audit):
+        for li in nwn_varaudit.issues_from(var_audit, len(haks_missing or ())):
             issues.append(li)
     except Exception as ex:  # noqa - an audit must never stop the analysis
         var_audit = dict(summary=dict(error=f"variable/tag audit failed: {ex}"), variables=[], tags=[], tokens=[])
@@ -2196,7 +2228,7 @@ def run_analysis(out_dir, verbose=True):
     summary["asset_duplicate_groups"] = len(asset_dups)
     report = dict(summary=summary, issues=issues, scripts=scripts, items=items, orphan_instances=orphan_instances,
                   orphans=orphans, skins=skins, ai_findings=ai_findings, performance=performance,
-                  duplicates=dups, merge_rules=2, noise_rules=1, asset_duplicates=asset_dups, deletions=deletions, areas=areas, conversations=convs, conversation_dynamic_starts=dyn_starts[:300], quests=quests,
+                  duplicates=dups, merge_rules=2, noise_rules=2, asset_duplicates=asset_dups, deletions=deletions, areas=areas, conversations=convs, conversation_dynamic_starts=dyn_starts[:300], quests=quests,
                   inferred_quests=inferred, var_audit=var_audit, pw_performance=pw_perf, factions=factions, databases=databases,
                   files=file_rows, models=models, hierarchy=g.hierarchy(),
                   breadcrumbs={nid: g.breadcrumb(nid) for nid in g.nodes if nid.startswith("inst:")},

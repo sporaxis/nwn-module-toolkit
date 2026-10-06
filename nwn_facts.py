@@ -61,6 +61,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import nwnlib as n  # noqa: E402
+import nwn_sheets  # noqa: E402
 import nwn_update  # noqa: E402
 
 WORKSPACE = nwn_update.workspace_dir(HERE)     # NWN_WORKSPACE, an install's workspace, or ./nwn_workspace
@@ -566,7 +567,7 @@ class Facts:
             a = acc.get(f"{i.get('category')}|{i.get('node')}|{i.get('label')}")
             # the signature is the detail text with every number replaced by #, so a changed count ("3 scripts" ->
             # "4 scripts") still matches but different wording does not
-            if a and a.get("sig") == re.sub(r"\d+", "#", i.get("detail") or ""):
+            if a and nwn_sheets.sig_matches(a.get("sig"), i.get("detail")):
                 i = dict(i, accepted_by_design=True, accepted_note=a.get("note", ""))
             if category and i.get("category") != category:
                 continue

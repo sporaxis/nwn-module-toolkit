@@ -282,6 +282,19 @@ for f in ("Get2DAString",):
 # The literal passed to them is the variable name (a var: node).
 VAR_SET_RE = re.compile(r"^(SetLocal|SetCampaign|DeleteLocal|DeleteCampaign)\w*$")
 VAR_GET_RE = re.compile(r"^(GetLocal|GetCampaign)\w*$")
+# The argument position (0-based) that holds the name for calls with more than one string argument (nwscript.nss):
+# CreateObject(type, BLUEPRINT, location, appear, new tag), CreateItemOnObject(BLUEPRINT, target, stack, new tag),
+# Get2DAString(2DA, column, row), SetLocalString(object, NAME, value), SetCampaignString(campaign, NAME, value, pc).
+# lex_nss labels a string in any other position "<call>:arg<n>", so it is never read as that name.
+NAME_ARG = {"CreateObject": 1, "CreateObjectVoid": 1, "CreateItemOnObject": 0, "CreateItemOnObjectVoid": 0,
+            "Get2DAString": 0, "ActionStartConversation": 1, "BeginConversation": 0}
+for _f in ("SetLocalInt", "SetLocalFloat", "SetLocalString", "SetLocalObject", "SetLocalLocation", "SetLocalJson",
+           "GetLocalInt", "GetLocalFloat", "GetLocalString", "GetLocalObject", "GetLocalLocation", "GetLocalJson",
+           "DeleteLocalInt", "DeleteLocalFloat", "DeleteLocalString", "DeleteLocalObject", "DeleteLocalLocation",
+           "DeleteLocalJson", "SetCampaignInt", "SetCampaignFloat", "SetCampaignString", "SetCampaignVector",
+           "SetCampaignLocation", "SetCampaignJson", "GetCampaignInt", "GetCampaignFloat", "GetCampaignString",
+           "GetCampaignVector", "GetCampaignLocation", "GetCampaignJson", "DeleteCampaignVariable"):
+    NAME_ARG[_f] = 1
 
 # Files whose own content may mention other files by name (scanned for resref tokens).
 SCAN_EXTS = n.GFF_EXTENSIONS | {"2da", "mdl", "set", "txi", "nss", "ncs", "ssf", "mtr", "shd",
@@ -321,7 +334,8 @@ def lex_nss(src: str):
     out = []
     includes = []
     literals = []
-    stack: List[Optional[str]] = []
+    # one entry per open "(": [function name before it (None for a plain bracket), argument index so far]
+    stack: List[list] = []
     i, line, L = 0, 1, len(src)
     last_ident = None   # identifier just before a "(" names the call that is being opened
     last_sig = ""  # last non-blank character emitted (for detecting "..." + / + "...")
@@ -360,8 +374,13 @@ def lex_nss(src: str):
                     buf.append(src[j:j + 2]); j += 2; continue
                 buf.append(src[j]); j += 1
             lit = "".join(buf)
-            # Only the innermost call counts, e.g. SetLocalInt(o, "X", ...)
-            func = stack[-1] if stack else None
+            # Only the innermost call counts, e.g. SetLocalInt(o, "X", ...). For calls whose name argument sits at a
+            # known position (NAME_ARG), a string in another position is not that name and is labelled
+            # "<call>:arg<n>": CreateObject(.., "plc_invisobj", .., FALSE, "NEW_TAG") - the 5th is the new object's
+            # tag, not a blueprint; SetLocalString(o, "VAR", "value") - the 3rd is a value, not a variable name.
+            func = stack[-1][0] if stack else None
+            if func in NAME_ARG and stack[-1][1] != NAME_ARG[func]:
+                func = f"{func}:arg{stack[-1][1] + 1}"
             prev = last_sig
             k = j + 1
             while k < L and src[k] in " \t":
@@ -382,7 +401,9 @@ def lex_nss(src: str):
             last_sig = last_ident[-1]
             continue
         if c == "(":
-            stack.append(last_ident)
+            stack.append([last_ident, 0])
+        elif c == "," and stack:
+            stack[-1][1] += 1           # commas inside a nested call belong to that call's own entry
         elif c == ")":
             if stack:
                 stack.pop()
@@ -1694,12 +1715,25 @@ class Indexer:
                 if kind == "dlg_script" and via.endswith("/Active") and not has_sc:
                     self.issue("error", "wrong_script_type", src,
                                f"{via} -> '{name}' is used as a condition but has no StartingConditional()")
+                # A condition script (StartingConditional) in an action or event slot works: the engine runs it and
+                # ignores the value it returns - builders do this on purpose (a tester's report, 1.5.2), so it is only
+                # an info note. A script with neither entry point is an include library: nothing runs - an error.
                 elif kind in ("event_script", "module_event", "execute_script") and not has_main:
-                    self.issue("error", "wrong_script_type", src,
-                               f"{via} -> '{name}' is used as an event/action script but has no main()")
+                    if has_sc:
+                        self.issue("info", "wrong_script_type", src,
+                                   f"{via} -> '{name}' is a condition script (StartingConditional) used as an "
+                                   "event/action script - it runs, and what it returns is ignored")
+                    else:
+                        self.issue("error", "wrong_script_type", src,
+                                   f"{via} -> '{name}' is used as an event/action script but has no main()")
                 elif kind == "dlg_script" and via.endswith("/Script") and not has_main:
-                    self.issue("error", "wrong_script_type", src,
-                               f"{via} -> '{name}' is used as a conversation action but has no main()")
+                    if has_sc:
+                        self.issue("info", "wrong_script_type", src,
+                                   f"{via} -> '{name}' is a condition script (StartingConditional) used as a "
+                                   "conversation action - it runs, and what it returns is ignored")
+                    else:
+                        self.issue("error", "wrong_script_type", src,
+                                   f"{via} -> '{name}' is used as a conversation action but has no main()")
 
 
 def find_haks(hak_names, explicit=(), search_dirs=()):
@@ -1735,15 +1769,63 @@ def find_haks(hak_names, explicit=(), search_dirs=()):
     return found, missing
 
 
-def default_hak_dirs(nwn_root=None, nwn_user=None):
-    """The hak folders the game may use, in search order: the user folder, the install folder, then the usual
-    "Neverwinter Nights" user folders on Windows and macOS (Documents/Neverwinter Nights, also under OneDrive), Linux
-    (~/.local/share). Folders may not exist."""
+def _nwn_folders(nwn_root=None, nwn_user=None):
+    """The folders that may hold the game's hak/, tlk/, modules/ folders and an nwn.ini, in search order: the user
+    folder, the install folder, then the usual "Neverwinter Nights" user folders on Windows and macOS
+    (Documents/Neverwinter Nights, also under OneDrive) and Linux (~/.local/share). Folders may not exist."""
     home = os.path.expanduser("~")
-    return [os.path.join(p, "hak") for p in (nwn_user, nwn_root,
-            os.path.join(home, "Documents", "Neverwinter Nights"),
-            os.path.join(home, "OneDrive", "Documents", "Neverwinter Nights"),
-            os.path.join(home, ".local", "share", "Neverwinter Nights")) if p]
+    return [p for p in (nwn_user, nwn_root, os.path.join(home, "Documents", "Neverwinter Nights"),
+                        os.path.join(home, "OneDrive", "Documents", "Neverwinter Nights"),
+                        os.path.join(home, ".local", "share", "Neverwinter Nights")) if p]
+
+
+def ini_aliases(folder):
+    """The [Alias] folders of <folder>/nwn.ini as {"HAK": path, "TLK": path, "MODULES": path, ...} (upper-case keys).
+
+    nwn.ini's [Alias] section can move the game's folders (HAK=D:\\NeverwinterNights\\NWN\\hak); a tester kept his
+    haks and tlk in the pre-EE layout and the toolkit found none of them (1.5.1). A relative path is taken from the
+    folder that holds nwn.ini; backslashes become the system's separator. Read-only; never raises ({} when there is
+    no readable nwn.ini or no [Alias] section)."""
+    out = {}
+    try:
+        with open(os.path.join(folder, "nwn.ini"), encoding="latin-1") as f:
+            text = f.read()
+    except (OSError, TypeError):
+        return out
+    section = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+            continue
+        if section != "alias" or "=" not in line or line.startswith((";", "#")):
+            continue
+        key, _, val = line.partition("=")
+        val = val.strip().strip('"')
+        if not val:
+            continue
+        val = val.replace("\\", os.sep).replace("/", os.sep)
+        if not os.path.isabs(val) and not re.match(r"^[A-Za-z]:", val):
+            val = os.path.normpath(os.path.join(folder, val))
+        out[key.strip().upper()] = val
+    return out
+
+
+def default_dirs(kind, nwn_root=None, nwn_user=None):
+    """The folders the game may use for one kind ("hak", "tlk", "modules"), in search order: for each NWN folder
+    (_nwn_folders), the folder its nwn.ini [Alias] names for that kind first, then <folder>/<kind>. Duplicates are
+    dropped; folders may not exist."""
+    out = []
+    for p in _nwn_folders(nwn_root, nwn_user):
+        for d in (ini_aliases(p).get(kind.upper()), os.path.join(p, kind)):
+            if d and d not in out:
+                out.append(d)
+    return out
+
+
+def default_hak_dirs(nwn_root=None, nwn_user=None):
+    """The hak folders the game may use, in search order (default_dirs("hak"): nwn.ini [Alias] HAK= folders included)."""
+    return default_dirs("hak", nwn_root, nwn_user)
 
 
 def base_tlk_candidates(nwn_root):
@@ -1757,8 +1839,7 @@ def locate_custom_tlk(custom_name, nwn_root=None, nwn_user=None):
     """Path of the module's custom tlk in the NWN tlk folders, or None (does not read the file)."""
     if not custom_name:
         return None
-    for d in default_hak_dirs(nwn_root, nwn_user):
-        td = os.path.join(os.path.dirname(d), "tlk")     # the tlk/ folder sits next to each hak/ folder
+    for td in default_dirs("tlk", nwn_root, nwn_user):     # nwn.ini [Alias] TLK= folders included
         if os.path.isdir(td):
             for fn in os.listdir(td):
                 if fn.lower() == f"{custom_name.lower()}.tlk":

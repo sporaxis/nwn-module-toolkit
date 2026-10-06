@@ -84,9 +84,12 @@ REANALYSE = [
     dict(key="merge_rules", since="1.5.2",
          what="Identical blueprints listed in your custom palette can be merged (Duplicates page)"),
     # noise_rules 1: item tag scripts in use; problems only in unused content as info; hak layering as info; Review
-    # items held back only by general reasons counted apart as "likely in use"
-    dict(key="noise_rules", since="1.5.2",
-         what="Fewer false alarms: item scripts counted as used, problems in unused content and hak layering as notes"),
+    # items held back only by general reasons counted apart as "likely in use"; 2: a tester's report - CreateObject's
+    # new-tag argument is not a blueprint, condition scripts in action slots, static placeables / OnConversation,
+    # creature heartbeats as notes, where a mismatched variable is set
+    dict(key="noise_rules", since="1.5.2", value=2,
+         what="Fewer false alarms: item scripts counted as used, problems in unused content and hak layering as notes, "
+              "a CreateObject's new tag no longer read as a blueprint, harmless missing scripts as notes"),
 ]
 
 # --- (a) bringing work across -------------------------------------------------------------------------------
@@ -137,8 +140,17 @@ def report_stamp():
 
 
 def missing_features(report):
-    """The REANALYSE entries a report lacks: what analysing the module again would add. [] for a current report."""
-    return [dict(f) for f in REANALYSE if f["key"] not in (report or {})]
+    """The REANALYSE entries a report lacks: what analysing the module again would add. [] for a current report.
+    An entry with a `value` also counts as lacking when the report's number for it is lower (rules revised within a
+    version, e.g. noise_rules 1 -> 2)."""
+    r = report or {}
+
+    def lacks(f):
+        if f["key"] not in r:
+            return True
+        v = r[f["key"]]
+        return "value" in f and isinstance(v, int) and v < f["value"]
+    return [dict(f) for f in REANALYSE if lacks(f)]
 
 
 # ============================================================================================ (c) newer-work guard

@@ -35,9 +35,17 @@ def issue_key(i):
 
 
 def issue_sig(detail):
-    """The issue's detail with every number masked: an accepted issue counts again only if its text changes in
-    another way after a re-analysis (the Issues page uses the same rule)."""
-    return re.sub(r"\d+", "#", str(detail or ""))
+    """The issue's detail with every number masked, up to "; used by " when it has one: an accepted issue counts again
+    only if its text changes in another way after a re-analysis (the Issues page and nwn_facts use the same rule).
+    The list of users is left out so that accepting a missing script covers every object that names it, including
+    ones added later (a tester leaves OnConversation names a script that doesn't exist on purpose, on dozens of NPCs).
+    A stored signature is cut the same way, so ones saved before this rule still match (sig_matches)."""
+    return re.sub(r"\d+", "#", str(detail or "").split("; used by ")[0])
+
+
+def sig_matches(stored, detail):
+    """Does an accepted issue's stored signature still match this detail? (older signatures held the whole text)"""
+    return str(stored or "").split("; used by ")[0] == issue_sig(detail)
 
 
 def all_issues(report, compile_result=None):
@@ -129,7 +137,7 @@ def plan_issues(issues, accepted, data):
         cur = accepted.get(k)
         sig = issue_sig(i["detail"])
         if v:
-            if cur and cur.get("sig") == sig and (cur.get("note") or "") == (note or cur.get("note") or ""):
+            if cur and sig_matches(cur.get("sig"), i["detail"]) and (cur.get("note") or "") == (note or cur.get("note") or ""):
                 unchanged += 1
             else:
                 out["accept"].append(dict(key=k, sig=sig, category=i["category"], label=i["label"],

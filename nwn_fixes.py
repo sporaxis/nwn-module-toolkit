@@ -49,9 +49,13 @@ def _missing_hint(detail):
 def _missing_script(i):
     d = i.get("detail", "")
     nm = _first(d, "the script")
+    if "named only where that does no harm" in d:
+        return ("Nothing to fix: no slot listed ever runs a script (static placeables), or the empty name is the "
+                "trick that keeps an NPC from talking (OnConversation). Tick By design to hide it for good - that "
+                "covers every object naming this script, including ones you add later.")
     return (_missing_hint(d) + f"If '{nm}' really doesn't exist: open each place listed (object and event slot) in the "
             f"toolset and clear or correct the slot - or create {nm}.nss with the Script generator, which fixes them all "
-            "at once. Click the issue for every place that names it. The Log monitor shows a 'script not found' error "
+            "at once. 'All places' under the detail lists every slot that names it. The Log monitor shows a 'script not found' error "
             "when the game hits it.")
 
 
@@ -105,11 +109,23 @@ def _variable_case_twin(i):
 
 
 def _variable_type(i):
-    return ("Read the variable with the same type it is set with (GetLocalString for a string, GetLocalInt for an "
-            "int), or change the setter - NWN keeps each type separate, so the read currently gets 0/\"\".")
+    return ("If the name is reused for a different value on purpose, tick By design. Otherwise read the variable with "
+            "the type it is set with (GetLocalString for a string, GetLocalInt for an int) or change the setter - NWN "
+            "keeps each type separate, so this read gets 0/\"\" unless something the toolkit can't see sets it. "
+            "'All places' under the detail lists where it is set and where it is read.")
 
 
 def _wrong_script_type(i):
+    """Advice for wrong_script_type, by the detail nwn_index writes: a condition script in an action/event slot (works,
+    info), a script with no entry point at all in such a slot (an include: nothing runs), or an action script in a
+    condition slot."""
+    d = i.get("detail", "")
+    if "is a condition script" in d:
+        return ("Nothing to fix: a StartingConditional script in an action slot runs like any action script and its "
+                "result is ignored. Tick By design to hide this note.")
+    if "has no main()" in d:
+        return ("This script has no void main() (nor StartingConditional), so it is an include library and nothing "
+                "runs in this slot. Put the intended script in the slot, or give this one a void main().")
     return ("A conversation condition must be a script with int StartingConditional(). Put this script in the "
             "action slot instead, or rewrite it as a condition (Script generator: 'Conversation: Text appears when').")
 

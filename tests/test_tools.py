@@ -1390,8 +1390,8 @@ def fix_texts():
     for cat in ("tlk_not_found", "base_game_not_found"):
         f = nwn_fixes.fix_for({"category": cat})
         check(f"fixes: {cat} writes paths with forward slashes", "\\" not in f and "/" in f, f)
-    doc = nwn_index.default_hak_dirs.__doc__
-    check("index: default_hak_dirs names the Windows/macOS and Linux user folders",
+    doc = nwn_index._nwn_folders.__doc__
+    check("index: the hak/tlk folder search names the Windows/macOS and Linux user folders",
           "macOS" in doc and "~/.local/share" in doc, doc)
 
 

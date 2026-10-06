@@ -127,6 +127,7 @@ import nwn_build
 import nwn_compile
 import nwn_edit
 import nwn_hakedit
+import nwn_index
 import nwn_logs
 import nwn_nasher
 import nwn_palette
@@ -400,7 +401,9 @@ def settings_warnings(s):
     if root and not (os.path.isdir(os.path.join(root, "data")) and os.path.isdir(os.path.join(root, "lang"))):
         out.append(f"NWN install folder: {root} has no data and lang folders - choose the game's install folder "
                    "(the one that contains them)")
-    if user and not os.path.isdir(os.path.join(user, "modules")):
+    # the modules folder may be moved by nwn.ini's [Alias] MODULES= (nwn_index.ini_aliases)
+    if user and not os.path.isdir(os.path.join(user, "modules")) and \
+            not os.path.isdir(nwn_index.ini_aliases(user).get("MODULES") or os.path.join(user, "modules")):
         out.append(f"NWN user folder: {user} has no modules folder - choose Documents/Neverwinter Nights "
                    "(on Linux ~/.local/share/Neverwinter Nights)")
     for t in s.get("external_tools") or []:
@@ -1033,7 +1036,8 @@ def housekeep_state():
     last scan and the Move batches that can be undone. Read-only."""
     import nwn_housekeep
     s = settings()
-    guess = os.path.join(s["nwn_user"], "modules") if s.get("nwn_user") else ""
+    guess = (nwn_index.ini_aliases(s["nwn_user"]).get("MODULES") or os.path.join(s["nwn_user"], "modules")) \
+        if s.get("nwn_user") else ""             # nwn.ini [Alias] MODULES= moves it
     last = nwn_housekeep.last_scan(WORKSPACE)
     prefs = nwn_housekeep.load_prefs(WORKSPACE)
     return dict(folder=prefs.get("folder") or (last or {}).get("summary", {}).get("folder") or guess,
@@ -1477,8 +1481,11 @@ def analyse_command(module, haks, tlk, nm, s):
         cmd += ["--hak", h]
     if tlk:
         cmd += ["--tlk", tlk]
-    if s.get("nwn_root"):
-        cmd += ["--nwn-root", s["nwn_root"]]
+    # no install folder set: use one found in the usual places (read-only), so the base game is read without a
+    # trip to Settings - a tester's first run read none of it and saw base-game scripts reported missing (1.5.1)
+    root = s.get("nwn_root") or next(iter(default_nwn_roots()), "")
+    if root:
+        cmd += ["--nwn-root", root]
     if s.get("nwn_user"):
         cmd += ["--nwn-user", s["nwn_user"]]
     return cmd

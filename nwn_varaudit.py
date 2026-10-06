@@ -190,9 +190,17 @@ def audit_variables(qi, facts, toolset):
             # on every single variable; only writes with a matching literal part do
             dyn = qi._doubt_writes(sysname, key, skip_wildcards=True)
             if typed:
-                findings.append(dict(kind="type_mismatch", level="warning", text=(
-                    f"read as {vt}, but only ever set as {', '.join(sorted(x['vtype'] for x in typed))} - NWN keeps the "
-                    f"types apart, so this read always gets the empty value")))
+                # where the other type is set: script lines and toolset variables (a blueprint's or placed object's
+                # Variables) - a tester could not find where from the issue alone
+                where = []
+                for x in typed:
+                    where += [f"{r['script']}:{r['line']} ({x['vtype']})" for r in x["sets"]]
+                    where += [f"{t['label']} ({x['vtype']}, toolset variable)" for t in x["toolset"]]
+                findings.append(dict(kind="type_mismatch", level="warning", set_where=where[:MAX_REFS], text=(
+                    f"read as {vt}, but this name is only set as {', '.join(sorted(x['vtype'] for x in typed))} "
+                    f"(set in {', '.join(where[:3])}{' …' if len(where) > 3 else ''}) - NWN keeps each type a separate "
+                    "variable even with the same name, so this read gets the empty value unless something the toolkit "
+                    "can't see sets it (fine if the name is reused for another value on purpose)")))
             elif twins:
                 findings.append(dict(kind="case_twin", level="warning", text=(
                     f"never set under this spelling, but {', '.join(twins)} is - variable names are case-sensitive")))
@@ -249,11 +257,18 @@ def audit_tags(db, g, qi):
     _AuditInference (its comment-free code, for run-time tags). Status: placed / runtime / spawned are ok; blueprint_only, case_twin and missing are warnings,
     because the lookup returns OBJECT_INVALID and the script's action on it usually does nothing, without an error."""
     placed, bp_tags = defaultdict(int), defaultdict(set)
-    for tag, is_bp, node in db.execute("SELECT tag, is_blueprint, node FROM objects WHERE tag IS NOT NULL AND tag <> ''"):
+    examples = defaultdict(list)          # tag -> up to 3 nodes carrying it (to name a case twin's holders)
+    bp_resref = defaultdict(list)         # blueprint resref (lower case) -> its nodes: a tag lookup given a resref
+    for tag, is_bp, node, resref in db.execute("SELECT tag, is_blueprint, node, resref FROM objects "
+                                               "WHERE tag IS NOT NULL AND tag <> ''"):
         if is_bp:
             bp_tags[tag].add(node)
+            if resref:
+                bp_resref[resref.lower()].append((node, tag))
         else:
             placed[tag] += 1
+        if len(examples[tag]) < 3:
+            examples[tag].append(node)
     # area tags too (GetObjectByTag finds areas); only the module's own .are files when the module source is known
     sid = db.execute("SELECT id FROM sources WHERE kind='module'").fetchone()
     for (tag,) in db.execute("SELECT fi.value FROM fields fi JOIN files f ON f.id=fi.file_id WHERE f.ext='are' "
@@ -282,6 +297,9 @@ def audit_tags(db, g, qi):
         d["n"] += 1
         if len(d["refs"]) < MAX_REFS:
             d["refs"].append(dict(script=script, line=line, func=func))
+    def lab(nd):
+        """A node's readable label (the graph's) or the node id when there is no graph."""
+        return g.label(nd) if g is not None else nd
     lower_all = defaultdict(set)
     for t in list(placed) + list(bp_tags) + list(runtime):
         lower_all[t.lower()].add(t)
@@ -301,8 +319,15 @@ def audit_tags(db, g, qi):
         else:
             twins = sorted(lower_all.get(tag.lower(), set()) - {tag})
             if twins:
-                status, level, text = "case_twin", "warning", (f"no object has this exact tag, but {', '.join(twins[:3])} "
-                                                               "exists - tags are case-sensitive")
+                # say which objects carry the other spelling, and - a common mix-up - when the name looked up is a
+                # blueprint's resref: tag lookups compare the tag, never the resref (a tester read the resref as tag)
+                holders = [lab(x) for t_ in twins[:2] for x in examples.get(t_, [])][:3]
+                rr = [f"{lab(nd)} has resref {tag.lower()} but tag {t_}" for nd, t_ in bp_resref.get(tag.lower(), [])
+                      if t_ != tag][:2]
+                status, level, text = "case_twin", "warning", (
+                    f"no object has this exact tag, but {', '.join(twins[:3])} exists"
+                    + (f" (on {', '.join(holders)})" if holders else "") + " - tags are case-sensitive"
+                    + (f"; note: {'; '.join(rr)} - lookups by tag use the tag, not the resref" if rr else ""))
             else:
                 status, level, text = "missing", "warning", ("no object in the module, its haks or scripts' run-time "
                                                              "tags has this tag - the lookup finds nothing (unless a "
@@ -434,22 +459,30 @@ def run(db, g):
     return dict(summary=summary, variables=variables, tags=tags, tokens=tokens)
 
 
-def issues_from(audit):
+def issues_from(audit, haks_missing=0):
     """The high-signal findings, as analysis issues (the page has the rest).
 
     audit: run()'s result. Only variable type mismatches and case twins at warning level, and tag case twins, are
     raised: these are almost always real bugs, while read-never-set and missing tags have many innocent causes.
+    haks_missing: how many of the module's haks were not read - a hak may set the variable with the read's type or
+    hold the object with the exact tag, so then these are info notes saying so.
     Returns [dict(severity, category, node, label, detail)]."""
     out = []
+    sev = "info" if haks_missing else "warning"
+    hint = f" ({haks_missing} hak(s) not loaded - it may be there)" if haks_missing else ""
     for v in audit["variables"]:
         for f in v["findings"]:
             if f["kind"] in ("type_mismatch", "case_twin") and f["level"] == "warning":
                 where = ", ".join(f"{r['script']}:{r['line']}" for r in v["reads"][:3])
-                out.append(dict(severity="warning", category=f"variable_{f['kind']}", node=f"var:{v['name']}",
-                                label=v["name"], detail=f"{v['name']} ({v['vtype']}): {f['text']}. Read in {where}"))
+                # places: every read and (type mismatch) every set of the other type, for the issue's detail panel
+                places = [f"read as {v['vtype']}: {r['script']}:{r['line']}" for r in v["reads"]] + \
+                    [f"set: {w_}" for w_ in f.get("set_where", [])]
+                out.append(dict(severity=sev, category=f"variable_{f['kind']}", node=f"var:{v['name']}",
+                                label=v["name"], detail=f"{v['name']} ({v['vtype']}): {f['text']}{hint}. Read in {where}",
+                                places=places))
     for t in audit["tags"]:
         if t["status"] == "case_twin":
             where = ", ".join(f"{r['script']}:{r['line']}" for r in t["refs"][:3])
-            out.append(dict(severity="warning", category="tag_case", node=f"tag:{t['tag']}", label=t["tag"],
-                            detail=f"{t['tag']}: {t['detail']}. Looked up in {where}"))
+            out.append(dict(severity=sev, category="tag_case", node=f"tag:{t['tag']}", label=t["tag"],
+                            detail=f"{t['tag']}: {t['detail']}{hint}. Looked up in {where}"))
     return out

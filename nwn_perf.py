@@ -297,12 +297,15 @@ def run(db, g, live):
             rows[rel]["encounter_max"] += int(val)
     # heartbeats (placed objects, areas, module)
     hb_scripts = defaultdict(list)     # script -> [owner nodes]
+    creature_hb = set()                # (script, owner) pairs that are a creature's heartbeat (ScriptHeartbeat)
     # the graph's event edges carry the event field name in `via` (OnHeartbeat for objects, ScriptHeartbeat
     # for creatures, Mod_OnHeartbeat for the module)
     for src, dst, via in db.execute("SELECT src, dst, via FROM edges WHERE kind IN ('event_script','module_event') AND "
                                     "(via LIKE '%OnHeartbeat' OR via LIKE '%ScriptHeartbeat' OR via LIKE '%Mod_OnHeartbeat')"):
         script = dst[7:]
         hb_scripts[script].append(src)
+        if via.endswith("ScriptHeartbeat"):
+            creature_hb.add((script, src))
         if src.startswith("inst:"):
             area = src.split(":", 2)[1]
             if area in rows:
@@ -326,8 +329,14 @@ def run(db, g, live):
         where = "the module" if any(o == "module" for o in owners) else \
             (f"{len(insts)} placed object(s)" if insts else f"{len(owners)} area(s)/blueprint(s)")
         if loops:
-            # a warning when it runs more than once (several objects, or an area/module heartbeat); one object: info
-            sev = "warning" if len(insts) > 1 or any(not o.startswith("inst:") for o in owners) else "info"
+            # a warning when it runs more than once (several objects, or an area/module heartbeat); one object: info.
+            # A script run only as creatures' heartbeats is info too: it runs only while such a creature exists
+            # (most NPCs are spawned, not always there), and more slowly in areas with no players (AI_LEVEL_VERY_LOW,
+            # about every 10 s - nwnlexicon AI_LEVEL); NPC heartbeats calling AI or looking around is normal. A
+            # tester's report on 1.5.1 found these flagged on every custom NPC.
+            only_creatures = all((script, o) in creature_hb for o in owners)
+            sev = "warning" if not only_creatures and (len(insts) > 1 or any(o == "module" or o.startswith("area:")
+                                                                              for o in owners)) else "info"
             findings.append(dict(severity=sev, category="perf_heavy_heartbeat", node=f"script:{script}", label=script,
                                  detail=f"heartbeat script run by {where} every 6 s walks objects ({', '.join(loops)}) - "
                                         "the cost grows with players/objects; consider a trigger or a timed event instead",

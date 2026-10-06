@@ -1,1 +1,1 @@
-vault 1.5.2 a3bc893
+vault 1.5.2 39f30d9

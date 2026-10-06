@@ -946,7 +946,9 @@ def build(analysis_dir, plan, out_dir=None, name=None, run_audit=True, verbose=T
         msg = (f"Clean build: -{s_['deleted']} files, {s_['merged']} merges, {s_['field_changes']} reference edits\n\n" +
                open(os.path.join(out_dir, "changes.md"), encoding="utf-8").read()[:60000])
         # the message goes through a file: Windows refuses command lines over ~32,000 characters (WinError 206)
-        msg_file = os.path.join(out_dir, ".commit_message.txt")
+        # absolute: git runs in the clean folder (-C), so a relative path (an analysis given as "tfn") would be
+        # looked for there and the commit fails
+        msg_file = os.path.abspath(os.path.join(out_dir, ".commit_message.txt"))
         with open(msg_file, "w", encoding="utf-8") as fh:
             fh.write(msg)
         try:

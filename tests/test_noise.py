@@ -133,12 +133,135 @@ def resref_needs_runner(tmp):
           any(d["node"] == "script:wand_flame" for d in rep["deletions"]))
 
 
+def tester_fixture(tmp):
+    """A module built from a tester's report on 1.5.1 (each case is real code or a real slot from it, renamed):
+      - a disease script creating "plc_invisobj" with the NEW TAG "DS_DISEASE" as CreateObject's 5th argument;
+      - a conversation whose action slot runs a StartingConditional script (if_takegold) - works in the game;
+      - NPCs whose OnConversation names npc_nochat, which doesn't exist (the "don't turn to talk" trick), a static
+        placeable whose OnUsed names a script that doesn't exist, and a door whose OnOpen does (a real error);
+      - STORE read as a string but set only as an object (sh_store:3) and as a string in no place;
+      - QUESTKEY read as int, set as a string on a creature blueprint's Variables (toolset);
+      - GetItemPossessedBy(oPC, "ghost_key") while the item blueprint ghost_key has the tag Ghost_Key;
+      - a creature blueprint whose heartbeat looks around (GetFirstObjectInShape) - spawned NPCs only."""
+    mod = os.path.join(tmp, "mod")
+    os.makedirs(mod)
+    g = lambda fn, r: w(mod, fn, n.write_gff(r))  # noqa: E731
+    g("module.ifo", root("IFO ", Mod_Name=loc("Tester"), Mod_Entry_Area=(R, "area001"),
+                         Mod_Area_list=(LST, [st(6, Area_Name=(R, "area001"))]), Mod_OnModLoad=(R, "mod_load")))
+    g("area001.are", root("ARE ", Name=loc("Hall"), Tag=(X, "HALL"), ResRef=(R, "area001"), Tileset=(R, "tcn01")))
+    npc = lambda tag: st(4, TemplateResRef=(R, "guard"), Tag=(X, tag), FirstName=loc(tag),  # noqa: E731
+                         ScriptDialogue=(R, "npc_nochat"), Conversation=(R, "shop_dlg"))
+    g("area001.git", root("GIT ", **{
+        "Creature List": (LST, [npc("GUARD1"), npc("GUARD2")]),
+        "Placeable List": (LST, [st(9, TemplateResRef=(R, "statue"), Tag=(X, "STATUE"), LocName=loc("Statue"),
+                                    Static=(B, 1), OnUsed=(R, "statue_use"))]),
+        "Door List": (LST, [st(8, TemplateResRef=(R, "door1"), Tag=(X, "DOOR1"), LocName=loc("Door"),
+                                OnOpen=(R, "door_gone"))])}))
+    g("guard.utc", root("UTC ", TemplateResRef=(R, "guard"), Tag=(X, "GUARD"), FirstName=loc("Guard"),
+                        ScriptHeartbeat=(R, "guard_hb"),
+                        VarTable=(LST, [st(0, Name=(X, "QUESTKEY"), Type=(DW, 3), Value=(X, "abc"))])))
+    g("ghost_key.uti", root("UTI ", **item_fields("ghost_key", "Ghost_Key", "Ghost Key")))
+    g("shop_dlg.dlg", dlg("if_takegold"))
+    script(mod, "if_takegold", 'int StartingConditional()\n{\n    TakeGoldFromCreature(10, GetPCSpeaker());\n'
+                               '    return TRUE;\n}\n')
+    script(mod, "guard_hb", 'void main()\n{\n    object o = GetFirstObjectInShape(SHAPE_SPHERE, 10.0, GetLocation(OBJECT_SELF));\n'
+                            '    while (GetIsObjectValid(o)) { o = GetNextObjectInShape(SHAPE_SPHERE, 10.0, GetLocation(OBJECT_SELF)); }\n}\n')
+    script(mod, "ds_disease", 'void main()\n{\n    location l = GetLocation(OBJECT_SELF);\n    object oC = CreateObject('
+                              'OBJECT_TYPE_PLACEABLE,"plc_invisobj",Location(GetAreaFromLocation(l),GetPosition(OBJECT_SELF),0.0),'
+                              'FALSE,"DS_DISEASE");\n    SetLocalString(oC, "MARK", "not_a_variable_name");\n}\n')
+    script(mod, "sh_store", 'void main()\n{\n    object oStore = GetNearestObject(OBJECT_TYPE_STORE);\n'
+                            '    SetLocalObject(OBJECT_SELF, "STORE", oStore);\n}\n')
+    script(mod, "mod_load", 'void main()\n{\n    object o = GetFirstPC();\n    ExecuteScript("ds_disease", o);\n'
+                            '    ExecuteScript("sh_store", o);\n'
+                            '    if (GetLocalString(o, "STORE") == "") SendMessageToPC(o, "x");\n'
+                            '    if (GetLocalInt(o, "QUESTKEY")) SendMessageToPC(o, "y");\n'
+                            '    if (GetIsObjectValid(GetItemPossessedBy(o, "ghost_key"))) SendMessageToPC(o, "z");\n}\n')
+    return mod
+
+
+def tester_feedback(tmp):
+    """Each point of the tester's report: the false alarm is gone, or the finding now says where to look."""
+    import nwn_sheets
+    rep = h.analyse(tester_fixture(tmp), os.path.join(tmp, "an"))
+    iss = rep["issues"]
+    by = lambda cat, word: [i for i in iss if i["category"] == cat and word in (i["node"] + i["detail"])]  # noqa: E731
+    bps = {i["node"] for i in iss if i["category"] == "missing_blueprint"}
+    check("CreateObject's 5th argument is the new tag, not a blueprint: no missing ds_disease blueprint",
+          not any("ds_disease" in b_ for b_ in bps), bps)
+    check("... and the 2nd argument (plc_invisobj) is still the blueprint it creates", "bp:plc_invisobj.utp" in bps, bps)
+    import nwn_index
+    lits = nwn_index.lex_nss('void main(){ SetLocalString(o, "MARK", "v"); CreateObject(1, "bp", l, FALSE, "TAG"); }')[2]
+    check("scanner: a string's argument position is kept (value / new tag are not names)",
+          [(f, x) for _l, f, x, _c in lits] == [("SetLocalString", "MARK"), ("SetLocalString:arg3", "v"),
+                                                 ("CreateObject", "bp"), ("CreateObject:arg5", "TAG")], lits)
+    w_ = by("wrong_script_type", "if_takegold")
+    check("a condition script in a conversation action slot is an info note (it works)",
+          w_ and all(i["severity"] == "info" for i in w_) and "it runs" in w_[0]["detail"], w_)
+    nochat = by("missing_script", "npc_nochat")
+    check("a script missing only in NPCs' OnConversation is an info note (the known trick)",
+          len(nochat) == 1 and nochat[0]["severity"] == "info" and "OnConversation" in nochat[0]["detail"], nochat)
+    statue = by("missing_script", "statue_use")
+    check("a script missing only on a static placeable is an info note (static placeables run no scripts)",
+          len(statue) == 1 and statue[0]["severity"] == "info" and "static placeable" in statue[0]["detail"], statue)
+    door = by("missing_script", "door_gone")
+    check("a script missing in a door's OnOpen stays an error", len(door) == 1 and door[0]["severity"] == "error", door)
+    d1 = nochat[0]["detail"] if nochat else ""
+    check("accepting a missing script covers every object naming it, also ones added later",
+          nwn_sheets.sig_matches(nwn_sheets.issue_sig(d1), d1.replace("used by 2 place(s)", "used by 3 place(s)")
+                                 .replace("GUARD2", "GUARD3")), d1)
+    check("an older stored signature (whole text) still matches", nwn_sheets.sig_matches(
+        __import__("re").sub(r"\d+", "#", d1), d1), d1)
+    page = open(os.path.join(h.ROOT, "dashboard.html"), encoding="utf-8").read()
+    check("page: the same rule (sigCore) and an 'All N places' list under an issue's detail",
+          'const sigCore = s => String(s || "").split("; used by ")[0];' in page and "All ${i.places.length} places" in page)
+    st_ = by("variable_type_mismatch", "STORE")
+    check("type mismatch says where the other type is set (script line)",
+          st_ and "sh_store:4 (object)" in st_[0]["detail"] and "reused" in st_[0]["detail"], st_)
+    qk = by("variable_type_mismatch", "QUESTKEY")
+    check("... including a toolset variable on a blueprint, and lists every place",
+          qk and "toolset variable" in qk[0]["detail"] and any(p.startswith("set:") for p in qk[0].get("places", [])), qk)
+    tc = by("tag_case", "ghost_key")
+    check("tag case: names what carries the other spelling and points out the resref/tag mix-up",
+          tc and "Ghost Key" in tc[0]["detail"] and "lookups by tag use the tag, not the resref" in tc[0]["detail"], tc)
+    hb = [f for f in rep.get("pw_performance", {}).get("findings", []) if f["category"] == "perf_heavy_heartbeat"
+          and f["label"] == "guard_hb"]
+    check("a creature-only heartbeat that looks around is an info note (runs only while the NPC exists)",
+          hb and hb[0]["severity"] == "info", hb)
+    check("... and is not an issue", not [i for i in iss if i["node"] == "script:guard_hb" and i["severity"] != "info"])
+
+
+def ini_alias(tmp):
+    """nwn.ini [Alias] moves the hak and tlk folders (a tester's pre-EE layout): haks and tlk are found there."""
+    import nwn_index
+    user = os.path.join(tmp, "user")
+    old = os.path.join(tmp, "NeverwinterNights", "NWN")
+    os.makedirs(os.path.join(old, "hak")); os.makedirs(os.path.join(old, "tlk")); os.makedirs(user)
+    w(os.path.join(old, "hak"), "my_hak.hak", b"HAK V1.0")
+    w(os.path.join(old, "tlk"), "my_tlk.tlk", b"TLK V3.0")
+    with open(os.path.join(user, "nwn.ini"), "w", encoding="latin-1") as f:
+        f.write("[Game Options]\nX=1\n[Alias]\nHAK=%s\nTLK=..\\NeverwinterNights\\NWN\\tlk\n"
+                % os.path.join(old, "hak").replace("/", "\\"))
+    al = nwn_index.ini_aliases(user)
+    check("nwn.ini: [Alias] HAK (absolute) and TLK (relative to nwn.ini's folder) are read",
+          os.path.normpath(al.get("HAK", "")).endswith(os.path.join("NWN", "hak")) and
+          os.path.isdir(al.get("TLK", "")), al)
+    found, missing = nwn_index.find_haks(["my_hak"], (), nwn_index.default_hak_dirs(None, user))
+    check("nwn.ini: a hak in the moved hak folder is found", len(found) == 1 and not missing, (found, missing))
+    check("nwn.ini: a custom tlk in the moved tlk folder is found",
+          (nwn_index.locate_custom_tlk("my_tlk", None, user) or "").endswith("my_tlk.tlk"))
+    check("nwn.ini: none or no [Alias] -> nothing", nwn_index.ini_aliases(tmp) == {})
+
+
 def main():
     """Run every group of checks; returns the exit code (tests/_harness.summary)."""
     with h.tempdir() as t:
         h.run(main_checks, t)
     with h.tempdir() as t:
         h.run(resref_needs_runner, t)
+    with h.tempdir() as t:
+        h.run(tester_feedback, t)
+    with h.tempdir() as t:
+        h.run(ini_alias, t)
     return h.summary()
 
 
