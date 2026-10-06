@@ -540,6 +540,26 @@ GENERAL_REVIEW = ("the module uses NWNX", "hak(s) not loaded", "a script creates
 UNUSED_SUFFIX = " - only in unused content (nothing in the module reaches it)"
 
 
+def missing_script_issues(db, g, not_loaded_hint=""):
+    """One missing_script issue per missing script, from the index's one-per-slot rows ("<field> -> 'name' not found in
+    module", node = the object holding the slot). A script named in 22 event slots is one problem with 22 places to
+    fix, not 22 problems: a big old module had 2,955 such rows for 900 scripts. The issue's node is the missing script
+    (script:<name>; its detail panel lists every user), its detail names the script, then says how many places name
+    it and lists the first ones ("<object>: <field>"); places carries them all. Read-only."""
+    by_name = defaultdict(list)
+    for _s, _c, n_, d in db.execute("SELECT * FROM issues WHERE category='missing_script'"):
+        m = re.match(r"(.*?) -> '([^']+)' not found", d)
+        if m:
+            by_name[m.group(2).lower()].append(f"{g.label(n_)}: {m.group(1)}")
+    out = []
+    for name, places in sorted(by_name.items()):
+        out.append(dict(severity="error", category="missing_script", node=f"script:{name}", label=name,
+                        detail=f"Script '{name}' not found in module{not_loaded_hint}; used by {len(places)} "
+                               f"place(s): {'; '.join(places[:6])}{' …' if len(places) > 6 else ''}",
+                        places=places[:200]))
+    return out
+
+
 def downgrade_unused(issues, g, live):
     """Lower errors and warnings of the UNUSED_DOWNGRADE kinds to info when nothing in use holds them: the issue's own
     node (a placed object counts as its area) is not live, or - for a missing resource, whose node is the thing that
@@ -970,9 +990,9 @@ def run_analysis(out_dir, verbose=True):
     # node that something refers to but for which no file was loaded: in_module = 0), then broken talk-table
     # references and resources that several sources supply.
     nwn_progress.stage("analysis", "Analysis: issues")
-    issues = [dict(severity=s, category=c, node=n_, label=g.label(n_),
-                   detail=d + (not_loaded_hint if c in ("missing_script",) else ""))
-              for s, c, n_, d in db.execute("SELECT * FROM issues")]
+    issues = [dict(severity=s, category=c, node=n_, label=g.label(n_), detail=d)
+              for s, c, n_, d in db.execute("SELECT * FROM issues") if c != "missing_script"]
+    issues += missing_script_issues(db, g, not_loaded_hint)
     for nid, nd in g.nodes.items():
         if nd["in_module"]:
             continue

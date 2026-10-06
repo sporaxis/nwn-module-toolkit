@@ -49,9 +49,10 @@ def _missing_hint(detail):
 def _missing_script(i):
     d = i.get("detail", "")
     nm = _first(d, "the script")
-    return (_missing_hint(d) + f"If '{nm}' really doesn't exist: open the object named in the issue in the toolset and "
-            f"clear or correct the event slot (or create {nm}.nss with the Script generator). The Log monitor shows a "
-            "'script not found' error when the game hits it.")
+    return (_missing_hint(d) + f"If '{nm}' really doesn't exist: open each place listed (object and event slot) in the "
+            f"toolset and clear or correct the slot - or create {nm}.nss with the Script generator, which fixes them all "
+            "at once. Click the issue for every place that names it. The Log monitor shows a 'script not found' error "
+            "when the game hits it.")
 
 
 def _missing_include(i):

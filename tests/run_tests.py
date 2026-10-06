@@ -60,7 +60,9 @@ def findings(mod, out, r):
 
     iss = {(i["category"], i["node"]) for i in r["issues"]}
     det = " | ".join(i["detail"] for i in r["issues"])
-    check("missing script 'not_here' found", ("missing_script", "bp:npc_merchant.utc") in iss, det)
+    ms = next((i for i in r["issues"] if i["category"] == "missing_script" and i["node"] == "script:not_here"), None)
+    check("missing script 'not_here' found (one issue for the script, listing the merchant's slot)",
+          ms is not None and any("npc_merchant" in p_ for p_ in ms.get("places", [])), det)
     check("wrong script type bad_cond found", any(c == "wrong_script_type" for c, _ in iss), det)
     check("uncompiled rat_death found", ("not_compiled", "script:rat_death") in iss, det)
     check("compiled-without-source orphan_only found", ("compiled_without_source", "script:orphan_only") in iss, det)

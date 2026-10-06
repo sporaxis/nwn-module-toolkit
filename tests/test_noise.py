@@ -44,7 +44,7 @@ def fixture(tmp):
     g = lambda fn, r: w(mod, fn, n.write_gff(r))  # noqa: E731
     g("module.ifo", root("IFO ", Mod_Name=loc("Noise"), Mod_Entry_Area=(R, "area001"),
                          Mod_Area_list=(LST, [st(6, Area_Name=(R, "area001"))]),
-                         Mod_OnModLoad=(R, "mod_load"), Mod_OnActvtItem=(R, "x2_mod_def_act"),
+                         Mod_OnModLoad=(R, "mod_load"), Mod_OnActvtItem=(R, "item_act"),
                          Mod_HakList=(LST, [st(8, Mod_Hak=(X, "noise_a")), st(8, Mod_Hak=(X, "noise_b"))])))
     g("area001.are", root("ARE ", Name=loc("Yard"), Tag=(X, "YARD"), ResRef=(R, "area001"), Tileset=(R, "tcn01")))
     g("area001.git", root("GIT ", **{"Door List": (LST, [st(8, TemplateResRef=(R, "door1"), Tag=(X, "DOOR1"),
@@ -58,6 +58,14 @@ def fixture(tmp):
     g("port_dlg.dlg", dlg("port_go"))
     script(mod, "port_go", 'void main()\n{\n    JumpToObject(GetWaypointByTag(GetScriptParam("DEST")));\n}\n')
     g("old_dlg.dlg", dlg("gone_dead"))                                     # nothing uses it
+    # a second slot naming the same missing script, and the resref-based item scripts (run by the module's
+    # ExecuteScript(GetResRef(oItem)); the wand's tag is different from its resref)
+    g("area001.git", root("GIT ", **{"Door List": (LST, [
+        st(8, TemplateResRef=(R, "door1"), Tag=(X, "DOOR1"), LocName=loc("Door"), OnOpen=(R, "gone_live")),
+        st(8, TemplateResRef=(R, "door1"), Tag=(X, "DOOR2"), LocName=loc("Back door"), OnOpen=(R, "gone_live"))])}))
+    g("wand_flame.uti", root("UTI ", **item_fields("wand_flame", "WAND_OF_FLAME", "Wand of Flame")))
+    script(mod, "wand_flame", 'void main()\n{\n    ApplyEffectToObject(DURATION_TYPE_INSTANT, EffectHeal(5), OBJECT_SELF);\n}\n')
+    script(mod, "item_act", 'void main()\n{\n    ExecuteScript(GetResRef(GetItemActivated()), GetItemActivator());\n}\n')
     script(mod, "mod_load", 'void main()\n{\n    object oPC = GetFirstPC();\n'
                             '    CreateItemOnObject(GetCampaignString("bank", "item"), oPC);\n}\n')
     # haks: the same texture in both (layered); hak b also carries mod_load.ncs (hides the module's own)
@@ -83,10 +91,15 @@ def main_checks(tmp):
           "dlg:port_dlg" not in dele and "script:port_go" not in dele, [k for k in dele if "port" in k])
     check("item script: the stone blueprint itself stays Review (only the palette lists it)",
           dele.get("bp:port_stone.uti", {}).get("status") == "Review", dele.get("bp:port_stone.uti"))
-    iss = {(i["category"], i["detail"].split(" -> ")[-1][:12]): i for i in rep["issues"] if i["category"] == "missing_script"}
     live = next((i for i in rep["issues"] if i["category"] == "missing_script" and "gone_live" in i["detail"]), None)
     dead = next((i for i in rep["issues"] if i["category"] == "missing_script" and "gone_dead" in i["detail"]), None)
     check("unused content: a missing script named in a used area stays an error", live and live["severity"] == "error", live)
+    check("one issue per missing script: two doors naming gone_live are one issue with two places",
+          sum(1 for i in rep["issues"] if i["category"] == "missing_script" and i["node"] == "script:gone_live") == 1 and
+          live["node"] == "script:gone_live" and len(live.get("places", [])) == 2 and "used by 2 place(s)" in live["detail"],
+          live)
+    check("resref scripts: with ExecuteScript(GetResRef(...)) in the module, wand_flame.nss (the wand's resref) is in use",
+          "script:wand_flame" not in dele, dele.get("script:wand_flame"))
     check("unused content: one named only in an unused conversation is an info note saying so",
           dead and dead["severity"] == "info" and "only in unused content" in dead["detail"], dead)
     check("summary: the count of issues lowered this way", rep["summary"].get("issues_in_unused", 0) >= 1, rep["summary"].get("issues_in_unused"))
@@ -110,12 +123,25 @@ def main_checks(tmp):
           "S.delGeneral" in page and "likely in use</span>" in page and 'id="dgen"' in page)
 
 
+def resref_needs_runner(tmp):
+    """Without a script that runs ExecuteScript(GetResRef(...)) (here only in a comment), a script named after an item's
+    resref but not its tag is not linked to the item: it stays a deletion candidate."""
+    mod, haks = fixture(tmp)
+    w(mod, "item_act.nss", 'void main()\n{\n    // ExecuteScript(GetResRef(GetItemActivated()), GetItemActivator());\n}\n')
+    rep = h.analyse(mod, os.path.join(tmp, "an2"), haks=haks)
+    check("resref scripts: no runner (only a comment) - no link, wand_flame.nss is an unused candidate",
+          any(d["node"] == "script:wand_flame" for d in rep["deletions"]))
+
+
 def main():
     """Run every group of checks; returns the exit code (tests/_harness.summary)."""
     with h.tempdir() as t:
         h.run(main_checks, t)
+    with h.tempdir() as t:
+        h.run(resref_needs_runner, t)
     return h.summary()
 
 
 if __name__ == "__main__":
     sys.exit(main())
+

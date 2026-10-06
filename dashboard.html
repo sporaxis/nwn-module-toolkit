@@ -1774,8 +1774,8 @@ VIEWS.issues = (m) => {
     group: rows.filter(i => i.severity !== "info" && !isAccepted(i)).length <= 20 ? "none" : undefined,
     hideCols: {"type": "category", "severity": "severity"},
     groupings: {"type": i => i.category.replace(/_/g, " "), "severity": i => i.severity, "where": i => areaOfNode(i.node),
-                // one group per missing thing: 2,955 "missing script" rows in a big module are 900 scripts, each used in several places
-                "what's missing": i => { const m_ = /-> '([^']+)' not found|^(?:Conversation|Blueprint|Journal quest) '([^']+)'/.exec(i.detail || "");
+                // one group per missing thing (a missing script is already one issue listing every place that names it)
+                "what's missing": i => { const m_ = /-> '([^']+)' not found|^(?:Script|Conversation|Blueprint|Journal quest) '([^']+)'/.exec(i.detail || "");
                   return m_ ? `${i.category.replace(/_/g, " ")}: ${m_[1] || m_[2]}` : i.category.replace(/_/g, " "); }},
     order: {"severity": (a, b) => ["error","warning","info"].indexOf(a) - ["error","warning","info"].indexOf(b),
             "type": (a, b, ra, rb) => rb.filter(i => i.severity === "error").length - ra.filter(i => i.severity === "error").length ||

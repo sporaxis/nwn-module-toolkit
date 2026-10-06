@@ -413,7 +413,12 @@ know). Two kinds of finding are info notes, not errors or warnings, so the real 
   it goes away when that content is deleted;
 - haks layered on each other: the same model, texture or material in two haks. The first in load order wins, by
   design (the Hak catalogue shows which). The module's own copy hidden by a hak, the override, and 2da and tileset
-  clashes stay warnings. When there are 20 errors and warnings or fewer they are shown as one list; with more, they are grouped by type
+  clashes stay warnings.
+
+A missing script is **one issue per script**, not one per event slot: its detail says how many places name it and
+lists the first ones (*object: slot*), and clicking it shows every place. Creating the script fixes them all at once;
+otherwise clear or correct each slot. (Issues you accepted as by design before this change was made show again once,
+because they are now keyed by the script.) When there are 20 errors and warnings or fewer they are shown as one list; with more, they are grouped by type
 (use **Group by** to change it). Every issue has a **How to fix** line: the concrete next step (which field, which
 toolset menu, which toolkit page). When the issue may be a false alarm (a hak or the base game not loaded, a name built
 at run time) the first step is to confirm it. The same advice is in `reports/issues.csv` (column *fix*) and in the
@@ -976,7 +981,9 @@ Found by following every reference from `module.ifo`.
 
 A script named after an item's tag (tag-based scripting: the game runs `<tag>.nss` when a player uses the item) is in
 use, with everything it leads to (a conversation it opens, the scripts that conversation runs), even when nothing in
-the module places the item: players can carry it.
+the module places the item: players can carry it. The same holds for a script named after an item's **resref** when
+a module script runs `ExecuteScript(GetResRef(oItem), ...)` (some modules' item-activation scripts do: the script
+named after the item blueprint runs, whatever the item's tag).
 
 **Export CSV** saves the candidates shown (node, files, size, status, reason and a `delete` column, "yes" for the ticked
 ones). Go through them in a spreadsheet, put yes or no in `delete`, save as CSV and press **Import…**: the preview shows

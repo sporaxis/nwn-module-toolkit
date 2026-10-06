@@ -293,6 +293,9 @@ TOKEN_RE = re.compile(rb"[A-Za-z0-9_-]{3,32}")   # "-" occurs in real resrefs (t
 
 # Name prefixes of BioWare / common-package scripts. Used only when the base game's KEY index could not be read
 # (is_base_script): a missing script with one of these prefixes is treated as base game, not reported as missing.
+# ExecuteScript(GetResRef(<object>) ...): the script named after an object's resref is run (resref-based item scripts)
+RESREF_EXEC_RE = re.compile(r"\bExecuteScript\s*\(\s*GetResRef\s*\(", re.I)
+
 BASE_GAME_PREFIXES = ("nw_", "x0_", "x1_", "x2_", "x3_", "nw_c2_", "nw_ch_", "nw_g0_",
                       "nw_o2_", "nw_s0_", "nw_s1_", "nw_s2_", "nw_s3_", "gen_", "k_", "cnr_", "plc_")
 
@@ -1530,6 +1533,20 @@ class Indexer:
                 for nd in items:
                     self.edge(nd, f"script:{sc}", "tag_based_script",
                               "Tag = script name" if sc == t else f"Tag-based script ('{sc[:len(sc) - len(t)]}' prefix)")
+        # resref-based item scripts: a module whose item-activation script runs ExecuteScript(GetResRef(oItem), ...)
+        # runs the script named after the item's resref (blueprint name), whatever its tag. When any module script does
+        # that, an item blueprint and a script of the same name are linked like a tag-based script (comments are
+        # removed before matching, so a commented-out call doesn't count)
+        runners = []
+        for name, src in self.db.execute("SELECT name, source FROM scripts WHERE source LIKE '%GetResRef%'"):
+            if src and RESREF_EXEC_RE.search(lex_nss(src)[0]):
+                runners.append(name)
+        if runners:
+            for nd in [x for x in self.nodes if x.startswith("bp:") and x.endswith(".uti")]:
+                rr = nd[3:-4]
+                if rr in scripts:
+                    self.edge(nd, f"script:{rr}", "tag_based_script",
+                              f"Resref = script name ({sorted(runners)[0]} runs ExecuteScript(GetResRef(...)))")
         # mark which scripts have compiled .ncs
         for (name,) in self.db.execute("SELECT name FROM scripts").fetchall():
             if f"{name}.ncs" in self.resources:
