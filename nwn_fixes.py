@@ -244,6 +244,16 @@ FIXES = {
     "2da_hak_vs_hak": lambda i: ("Decide which hak's version should win and remove or merge the other copy (Hak editor "
                                  "> 2da editor shows both)."),
     "2da_override": lambda i: "Remove the override copy or merge its rows into the hak's version.",
+    "2da_same_folder": lambda i: ("Keep one copy: delete the other, or move it out of the folder (a backup kept in a "
+                                  "subfolder still counts as a copy)."),
+    "class_feat_table_missing": lambda i: ("Add the feat table to the hak that provides classes.2da, or correct the "
+                                           "class's FeatsTable name in classes.2da (Hak editor > 2da editor)."),
+    "class_feat_null": lambda i: ("Usually nothing to do. If players report level-up errors with this class, remove "
+                                  "the empty rows from its feat table (Hak editor > 2da editor) and test again."),
+    "class_feat_missing": lambda i: ("Point each row at a feat that exists in feat.2da, or remove the row (Hak editor "
+                                     "> 2da editor); if the feat was moved, use its new row number."),
+    "class_feat_no_name": lambda i: ("Give the feat a name: set its FEAT column in feat.2da to a talk-table entry that "
+                                     "exists (add the text to your custom .tlk), or remove the row from the feat table."),
     "2da_stale": lambda i: ("Update the stale 2da copy to the newer base-game columns/rows (Hak editor > 2da editor), "
                             "or remove it if you don't change anything in it."),
     "perf_inventory": _perf_inventory,

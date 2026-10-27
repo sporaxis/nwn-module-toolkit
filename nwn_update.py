@@ -102,6 +102,15 @@ REANALYSE = [
     # toolset's temp0, an unlisted hak, the development folder: nwn_index.find_missing_elsewhere); toolset_unsaved
     dict(key="missing_bp_notes", since="1.5.5",
          what="Missing blueprints say when placed copies exist and where else the file is; a warning for unsaved toolset work"),
+    # tile_checks 1: holes in an area's tiles - a tile number the tileset lacks, a tile model nobody has, positions the
+    # tile list doesn't fill (nwn_minimap.tile_holes); class_feats 1: the classes' feat tables (nwn_classfeats);
+    # palette_notes 1: blueprints in no palette category as notes (nwn_palette.unplaced_issues)
+    dict(key="tile_checks", since="1.5.6",
+         what="Holes in an area's tiles: tiles the tileset doesn't have, tile models nobody has, empty tile positions"),
+    dict(key="class_feats", since="1.5.6",
+         what="The classes' feat tables (cls_feat_*.2da): empty rows, feats that don't exist, feats with no name"),
+    dict(key="palette_notes", since="1.5.6",
+         what="Blueprints in no palette category listed as notes on the Issues page"),
 ]
 
 # --- (a) bringing work across -------------------------------------------------------------------------------

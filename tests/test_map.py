@@ -8,7 +8,8 @@ ground as a finding").
   - layout: two areas joined edge to edge become one map, side by side;
   - checks on the Issues page: destination missing / wrong capitals / link switched off, a missing minimap image
     (error; a note when the base game wasn't read), an area set to Underground on an exterior tileset with weather,
-    a tileset nobody has;
+    a tileset nobody has, holes in an area's tiles (a tile number the tileset lacks, a tile model nobody has or none
+    named, tile positions the tile list doesn't fill - a tester's report, 2026-10-27), each hole drawn dark red;
   - the dashboard: /api/map draws once and keeps maps/, /api/map/png, Export as PNG.
     python tests/test_map.py          (last line "N/M checks passed"; exit code 1 on a failure)
 Works only in temporary folders and the test workspace (see tests/_harness.py).
@@ -68,7 +69,9 @@ def fixture(tmp):
     hills   (tout, but set to Underground, with rain, a day/night cycle and a sky box)
     cave    (tcave from the hak: one tile's minimap image exists nowhere)
     crypt   (tbase from the base game; its image is read from the game's data)
-    lost    (tileset nosuch: nobody has it)"""
+    lost    (tileset nosuch: nobody has it)
+    holey   (thole from the hak, 3 x 2 tiles but only 5 in its list: tile 7 that thole doesn't have, a tile whose
+            model nobody has, a tile whose .set section names no model, and one empty position)"""
     mod = os.path.join(tmp, "mod"); hakd = os.path.join(tmp, "hakfiles"); groot = os.path.join(tmp, "game")
     for d in (mod, hakd):
         os.makedirs(d)
@@ -82,12 +85,19 @@ def fixture(tmp):
     # left half red, right half blue: shows which way a turned tile faces
     w(hakd, "mi_tout_split.tga", tga(8, 8, lambda x, y: RED if x < 4 else BLUE))
     w(hakd, "mi_tcave_rock.tga", tga(8, 8, lambda x, y: ROCK))
+    # every tile model the tilesets name exists (so only holey's holes are reported); an ASCII model is enough here
+    for m in ("tout_a01_01", "tout_a02_01", "tout_a03_01", "tcave_a01_01", "tcave_r01_01", "thole_a01_01"):
+        w(hakd, m + ".mdl", f"newmodel {m}\nbeginmodelgeom {m}\nendmodelgeom {m}\ndonemodel {m}\n")
+    # thole: tile 0 is fine, tile 1's model exists nowhere, tile 2's section has no Model line
+    w(hakd, "thole.set", set_text("thole", 0, [("thole_a01_01", "mi_tout_grass"), ("thole_gone_01", "mi_tout_grass")])
+      + "\n[TILE2]\nImageMap2D=mi_tout_grass\n")
     hak = os.path.join(tmp, "tiles.hak")
     h.pack_hak(hakd, hak)
     n.write_key_bif(groot, {("tbase", "set"): set_text("tbase", 1, [("tbase_a01_01", "mi_tbase_floor")]).encode(),
+                            ("tbase_a01_01", "mdl"): b"newmodel tbase_a01_01\ndonemodel tbase_a01_01\n",
                             ("mi_tbase_floor", "tga"): tga(8, 8, lambda x, y: BASEC)})
     g = lambda fn, r: w(mod, fn, n.write_gff(r))  # noqa: E731
-    names = ["field_w", "field_e", "hills", "cave", "crypt", "lost", "broken"]
+    names = ["field_w", "field_e", "hills", "cave", "crypt", "lost", "broken", "holey"]
     g("module.ifo", root("IFO ", Mod_Name=loc("Map test"), Mod_Entry_Area=(R, "field_w"),
                          Mod_Area_list=(LST, [st(6, Area_Name=(R, a)) for a in names]),
                          Mod_HakList=(LST, [st(8, Mod_Hak=(X, "tiles"))])))
@@ -99,6 +109,7 @@ def fixture(tmp):
     area(mod, "cave", "Old Cave", "tcave", 2, 1, [(0, 0), (1, 0)], flags=2 | 1)
     area(mod, "crypt", "Crypt", "tbase", 1, 1, [(0, 0)], flags=1 | 2)
     area(mod, "lost", "Lost Place", "nosuch", 1, 1, [(0, 0)], flags=1)
+    area(mod, "holey", "Holey Ground", "thole", 3, 2, [(0, 0), (1, 0), (2, 0), (7, 0), (0, 0)], flags=1)
     # field_w (20 x 20 m): a trigger at its east edge to WP_E_IN at field_e's west edge, and back; plus broken ones
     g("field_w.git", root("GIT ", **{
         "TriggerList": (LST, [trig("TO_EAST", 19.0, 10.0, "WP_E_IN"), trig("TO_CAVE", 10.0, 2.0, "wp_cave_in"),
@@ -109,7 +120,7 @@ def fixture(tmp):
                                      "WaypointList": (LST, [wp("WP_E_IN", 2.0, 10.0)])}))
     g("hills.git", root("GIT ", **{"WaypointList": (LST, [wp("WP_HILLS", 10.0, 10.0)])}))
     g("cave.git", root("GIT ", **{"WaypointList": (LST, [wp("WP_CAVE_IN", 5.0, 5.0)])}))
-    for a in ("crypt", "lost"):
+    for a in ("crypt", "lost", "holey"):
         g(f"{a}.git", root("GIT "))
     # a damaged area file: indexed as a file, no fields (the Map page must still open)
     w(mod, "broken.are", b"ARE V3.2 this is not a real GFF")
@@ -133,7 +144,7 @@ def checks(tmp):
               rep.get("map_checks") == 1 and not [x for x in nwn_update.missing_features(rep) if x["key"] == "map_checks"],
               rep.get("map_summary"))
         sm = rep.get("map_summary") or {}
-        check("report: map summary counts areas and edge links", sm.get("areas") == 7 and sm.get("edge_links") == 2, sm)
+        check("report: map summary counts areas and edge links", sm.get("areas") == 8 and sm.get("edge_links") == 2, sm)
         dm = issues_by(rep, "transition_dest_missing")
         check("issue: a door to a tag nothing has is an error, on the door's node, with a fix",
               len(dm) == 1 and dm[0]["severity"] == "error" and dm[0]["node"] == "inst:field_w:Door List[0]"
@@ -160,6 +171,24 @@ def checks(tmp):
         tm = issues_by(rep, "area_tileset_missing")
         check("issue: an area whose tileset nobody has is an error", len(tm) == 1 and tm[0]["node"] == "area:lost"
               and tm[0]["severity"] == "error", tm)
+        tu = issues_by(rep, "area_tile_unknown")
+        check("issue: a tile number the tileset doesn't have is an ERROR on the area, naming the number, the count and "
+              "where the .set came from", len(tu) == 1 and tu[0]["node"] == "area:holey" and tu[0]["severity"] == "error"
+              and "7 (1)" in tu[0]["detail"] and "1 of 6 tiles" in tu[0]["detail"] and "tiles.hak" in tu[0]["detail"]
+              and tu[0].get("fix"), tu)
+        tmm = issues_by(rep, "area_tile_model_missing")
+        check("issue: tiles whose model nobody has, or whose .set names none, are an error naming each",
+              len(tmm) == 1 and tmm[0]["node"] == "area:holey" and tmm[0]["severity"] == "error"
+              and "thole_gone_01 (1)" in tmm[0]["detail"] and "(none) (1)" in tmm[0]["detail"]
+              and "2 of 6 tiles" in tmm[0]["detail"], tmm)
+        te = issues_by(rep, "area_tile_empty")
+        check("issue: tile positions the tile list doesn't fill are an error (1 of 3 x 2 empty)",
+              len(te) == 1 and te[0]["node"] == "area:holey" and te[0]["severity"] == "error"
+              and "1 of 6 tile positions" in te[0]["detail"] and "tile list has 5" in te[0]["detail"], te)
+        check("issue: areas whose tiles and models all exist have no tile issues (models in the hak and the game)",
+              not [i for i in tu + tmm + te if i["node"] != "area:holey"])
+        check("report: tile_checks marks the analysis and the summary counts the area with holes",
+              rep.get("tile_checks") == 1 and sm.get("tile_hole_areas") == 1, sm)
 
         # ---- the Map page: drawn on first use into maps/ by a job (pop-up with progress), then reused
         first = D.api_map({"a": a})
@@ -196,6 +225,12 @@ def checks(tmp):
         check("map: an image that exists but can't be decoded is grey and a note - not 'missing' anywhere",
               hl["drawn"] == 3 and any(c["c"] == "minimap_unreadable" and c["sv"] == "info" and c["a"] == "hills" for c in data["checks"])
               and not [i for i in issues_by(rep, "minimap_missing") if i["node"] == "area:hills"], hl)
+        ho = data["areas"]["holey"]
+        check("map: the holes are counted (a tile the tileset lacks + the empty position); the 4 others drawn, those "
+              "with a missing model too (they still have a minimap image)",
+              ho["holes"] == 2 and ho["drawn"] == 4 and data["summary"]["holes"] == 2, ho)
+        check("map: the checks list carries the tile findings too",
+              {c["c"] for c in data["checks"] if c["a"] == "holey"} >= {"tile_unknown", "tile_model_missing", "tile_empty"})
         check("map: a damaged area file doesn't stop the Map page (drawn as an empty area)",
               "broken" in data["areas"] and data["areas"]["broken"]["tiles"] == 0, data["areas"].get("broken"))
         t0 = os.path.getmtime(mp)
@@ -209,6 +244,7 @@ def checks(tmp):
             cv, stt = M.render_area(areas["field_w"], tilesets["tout"]["tiles"], tex, 8)
             cvc, _ = M.render_area(areas["crypt"], tilesets["tbase"]["tiles"], tex, 8)
             cvx, _ = M.render_area(areas["cave"], tilesets["tcave"]["tiles"], tex, 8)
+            cvh, sth = M.render_area(areas["holey"], tilesets["thole"]["tiles"], tex, 8)
         finally:
             res.close(); db.close()
         px = lambda c, x, y: tuple(c.px[(y * c.w + x) * 3:(y * c.w + x) * 3 + 3])  # noqa: E731
@@ -219,6 +255,10 @@ def checks(tmp):
         check("draw: a base-game image is drawn", px(cvc, 4, 4) == BASEC)
         check("draw: a tile with no image is plain light grey (never black, which the game uses for rock)",
               px(cvx, 12, 4) == M.MISSING_FILL and px(cvx, 4, 4) == ROCK)
+        # holey, 3 x 2 at 8 px: the 4th tile (x 0, north row) is tile 7, the 6th position (x 2, north row) is empty
+        check("draw: a hole is dark red and each tile is drawn on its own (one hole doesn't blank the area)",
+              px(cvh, 4, 4) == M.HOLE_FILL and px(cvh, 20, 4) == M.HOLE_FILL and px(cvh, 4, 12) == GREEN
+              and px(cvh, 12, 4) == GREEN and sth["holes"] == 2, (px(cvh, 4, 4), px(cvh, 20, 4), sth))
 
         # ---- dashboard endpoints
         i = data["areas"]["field_w"]["region"]
@@ -271,6 +311,10 @@ def checks(tmp):
               mm2 and all(x["severity"] == "info" and "base game was not read" in x["detail"] for x in mm2), mm2)
         tm2 = issues_by(rep2, "area_tileset_missing")
         check("issue: ... and so is a tileset that may be in the base game", tm2 and all(x["severity"] == "info" for x in tm2), tm2)
+        tmm2 = issues_by(rep2, "area_tile_model_missing")
+        check("issue: ... and a tile model that may be in the base game; a tile number the tileset lacks stays an error",
+              tmm2 and all(x["severity"] == "info" and "base game was not read" in x["detail"] for x in tmm2)
+              and all(x["severity"] == "error" for x in issues_by(rep2, "area_tile_unknown")), tmm2)
         d2 = D.map_data(out2)
         check("map: the Map page agrees with the Issues page (notes, not errors, without the base game)",
               all(c["sv"] == "info" for c in d2["checks"] if c["c"] in ("minimap_missing", "tileset_missing")), d2["checks"])

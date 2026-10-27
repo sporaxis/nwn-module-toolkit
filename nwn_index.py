@@ -1458,13 +1458,57 @@ class Indexer:
         rows = [(fid, resref, str(i), c, v, label) for i, (label, vals) in enumerate(t.rows)
                 for c, v in zip(t.columns, vals)]
         self.db.executemany("INSERT INTO twoda VALUES (?,?,?,?,?,?)", rows)
-        drift = [(i, label) for i, (label, _v) in enumerate(t.rows) if label != str(i)]
-        if drift:
-            self.issue("warning", "2da_row_label", f"2da:{resref}",
-                       f"{resref}.2da: {len(drift)} row label(s) differ from the row's position, e.g. "
-                       + ", ".join(f"line {i} labelled {label!r}" for i, label in drift[:4]) +
-                       " - the game uses the position, so anything that counts by the label points at another row")
+        # labels that drift from the position are judged in check_2da_labels, once the base game can be compared
         self.node(f"2da:{resref}", "2da", resref, f"{resref}.2da", fid, 1)
+
+    def check_2da_labels(self):
+        """2da_row_label warnings: rows whose first-column label differs from the line position (the game uses the
+        position; hand-merged tables often have labels that drift from it, so anything counting by the label points at
+        another row). Run once by post_process, from the labels index_2da stored in the twoda table.
+
+        Not reported (a tester's report, 2026-10-28: "this is vanilla behavior"): a label that matches the base game's
+        own copy of that 2da at the same line - 43 of the game's 2das have such labels (its cls_bfeat_* tables count
+        from 1: row 0 is class level 1) - and a cls_bfeat_* table numbered 1, 2, 3... all the way down, the readable
+        convention builders follow for bonus-feat tables. Reads the base game's 2das only when a table drifts.
+        Never raises; writes issues only."""
+        by_file = {}
+        for fid, name, row, label in self.db.execute(
+                "SELECT file_id, name, row, MIN(label) FROM twoda GROUP BY file_id, row"):
+            by_file.setdefault((fid, name), {})[int(row)] = label
+        drifting = [(k, labels) for k, labels in sorted(by_file.items())
+                    if any(labels[i] != str(i) for i in labels)]
+        if not drifting:
+            return
+        base, base_labels = None, {}
+        row_ = self.db.execute("SELECT value FROM meta WHERE key='nwn_root'").fetchone()
+        if row_ and row_[0]:
+            try:
+                base = n.BaseGame(row_[0])
+            except Exception:  # noqa - a damaged install only means nothing to compare with
+                base = None
+
+        def labels_of_base(name):
+            """[label per line] of the game's own name.2da, or None (not in the game, or unreadable)."""
+            if name not in base_labels:
+                base_labels[name] = None
+                data = base.get(f"{name}.2da") if base else None
+                if data:
+                    try:
+                        base_labels[name] = [label for label, _v in n.read_2da(n.decode_text(data)).rows]
+                    except ValueError:
+                        pass
+            return base_labels[name]
+        for (_fid, name), labels in drifting:
+            if name.startswith("cls_bfeat_") and all(labels[i] == str(i + 1) for i in labels):
+                continue
+            bl = labels_of_base(name)
+            drift = [(i, labels[i]) for i in sorted(labels) if labels[i] != str(i)
+                     and not (bl is not None and i < len(bl) and bl[i] == labels[i])]
+            if drift:
+                self.issue("warning", "2da_row_label", f"2da:{name}",
+                           f"{name}.2da: {len(drift)} row label(s) differ from the row's position, e.g. "
+                           + ", ".join(f"line {i} labelled {label!r}" for i, label in drift[:4]) +
+                           " - the game uses the position, so anything that counts by the label points at another row")
 
     def index_mdl(self, fid, resref, data):
         """Model: a models row (format, supermodel, textures as found by nwnlib.scan_mdl) and a template edge to
@@ -1604,6 +1648,7 @@ class Indexer:
             elif t == "2da" and f"{nm}.2da" in self.resources:
                 nd["in_module"] = 1
         self.validate()
+        self.check_2da_labels()
         self.find_missing_elsewhere()
         nwn_progress.stage("post", "Linking: writing the dependency graph")
         self.db.executemany("INSERT INTO nodes VALUES (?,?,?,?,?,?)",

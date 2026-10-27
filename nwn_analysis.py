@@ -2461,6 +2461,15 @@ def run_analysis(out_dir, verbose=True):
     except Exception as ex:  # noqa
         if verbose:
             print("  pitfall checks failed:", ex)
+
+    # ------------------------------------------------------------- the classes' feat tables (nwn_classfeats)
+    import nwn_classfeats
+    cf_issues, cf_summary = nwn_classfeats.run(db, meta)       # never raises: a failure is cf_summary["error"]
+    for ci in cf_issues:
+        ci.setdefault("label", g.label(ci["node"]) if ci["node"] in g.nodes else ci["node"])
+        issues.append(ci)
+    if verbose and cf_summary.get("error"):
+        print(" ", cf_summary["error"])
     # problems that only sit in unused content become info notes (see UNUSED_DOWNGRADE)
     issues_in_unused = downgrade_unused(issues, g, live)
     issues.sort(key=lambda i: (sev_order.get(i["severity"], 3), i["category"], i["label"]))
@@ -2531,6 +2540,10 @@ def run_analysis(out_dir, verbose=True):
                   labels={nid: nd["label"] for nid, nd in g.nodes.items()})
     if not map_summary.get("error"):
         report["map_checks"] = 1         # REANALYSE: left out when the checks failed, so Overview offers Analyse again
+        report["tile_checks"] = 1        # REANALYSE: holes in areas' tiles (nwn_minimap.tile_holes), same run
+    report["class_feats_summary"] = cf_summary
+    if not cf_summary.get("error"):
+        report["class_feats"] = 1        # REANALYSE: the classes' feat tables (nwn_classfeats)
     nwn_progress.stage("analysis", "Analysis: writing reports")
     write_csvs(out_dir, report)          # CSVs carry everything (all hak files, every impact row)
     module_nodes = {f["node"] for f in module_files}
@@ -2539,13 +2552,23 @@ def run_analysis(out_dir, verbose=True):
     report["toolkit"] = nwn_update.report_stamp()   # which version made this analysis (Overview; "analyse again" notice)
     with open(os.path.join(out_dir, "report.json"), "w", encoding="utf-8") as fh:
         json.dump(report, fh, ensure_ascii=False)
+
+    def add_late_issues(extra):
+        """Add issues found after report.json was first written (the catalogue's, the palette's): fixes, the
+        severity counts, report.json and issues.csv are brought up to date."""
+        nwn_fixes.add_fixes(extra)
+        report["issues"] += extra
+        report["summary"]["issues"] = dict(Counter(i["severity"] for i in report["issues"]))
+        with open(os.path.join(out_dir, "report.json"), "w", encoding="utf-8") as fh:
+            json.dump(report, fh, ensure_ascii=False)
+        write_csvs(out_dir, report, only=("issues.csv",))
     try:
         import nwn_catalog
         nwn_progress.stage("analysis", "Analysis: hak catalogue and 2da conflicts")
         cat = nwn_catalog.build_catalog(out_dir, verbose=verbose)
         extra = []
         for c in cat.get("twoda_conflicts", []):
-            if c["kind"] in ("hak-vs-hak", "override", "stale"):
+            if c["kind"] in ("hak-vs-hak", "override", "same-folder", "stale"):
                 extra.append(dict(severity="warning" if c["kind"] != "stale" else "error", category="2da_" + c["kind"].replace("-", "_"),
                                   node=f"2da:{c['table']}", label=f"{c['table']}.2da", detail=c["summary"] + (" → " + c["advice"] if c.get("advice") else "")))
         for h in cat.get("heads", []):
@@ -2553,12 +2576,7 @@ def run_analysis(out_dir, verbose=True):
                 extra.append(dict(severity="error", category="missing_head_model", node=h["node"], label=h["creature"],
                                   detail=f"head {h['head']} needs model {h['model']} which is not in the game, haks or module - the creature will show without a head"))
         if extra:
-            nwn_fixes.add_fixes(extra)
-            report["issues"] += extra
-            report["summary"]["issues"] = dict(Counter(i["severity"] for i in report["issues"]))
-            with open(os.path.join(out_dir, "report.json"), "w", encoding="utf-8") as fh:
-                json.dump(report, fh, ensure_ascii=False)
-            write_csvs(out_dir, report, only=("issues.csv",))
+            add_late_issues(extra)
     except Exception as ex:  # noqa - catalogue is best-effort
         if verbose:
             print("  catalogue failed:", ex)
@@ -2566,7 +2584,10 @@ def run_analysis(out_dir, verbose=True):
         # the Blueprints page: every custom blueprint and its palette category (palette.json, reports/palette.csv)
         import nwn_palette
         nwn_progress.stage("analysis", "Analysis: blueprint palette")
-        nwn_palette.build_palette(out_dir, verbose=verbose)
+        pal = nwn_palette.build_palette(out_dir, verbose=verbose)
+        # blueprints in no palette category: info notes on the Issues page (REANALYSE palette_notes)
+        report["palette_notes"] = 1
+        add_late_issues(nwn_palette.unplaced_issues(pal))
     except Exception as ex:  # noqa - best-effort like the catalogue; the dashboard builds it again when asked
         if verbose:
             print("  palette failed:", ex)

@@ -14,7 +14,8 @@ Two entry points for the toolkit
 --------------------------------
 - map_checks(db, nwn_root, label): called by nwn_analysis during an analysis. Names and positions only (no image is
   decoded), so it is quick (a 522-area world: about 8 s). Returns Issues-page issues (categories transition_<check>,
-  minimap_missing, area_tileset_missing, area_underground_outdoor, area_above_ground_cave) and a summary.
+  minimap_missing, area_tileset_missing, area_tile_unknown / _model_missing / _empty, area_underground_outdoor,
+  area_above_ground_cave) and a summary.
 - build_maps(analysis) / export_png(...): the dashboard's Map page. Draws every area and every joined map once, into
   <analysis>/maps (map.json + one PNG per map), the first time the page is opened (the same 522-area world: about
   30 s); export_png draws one map or area at 16 px per tile when asked.
@@ -36,6 +37,9 @@ module: walls join up this way and not the other).
 
 Limits (said where relevant)
 ----------------------------
+- A hole (a tile number the tileset doesn't have, or a tile position the tile list doesn't fill) is drawn dark red; the
+  rest of the area still draws, tile by tile. A tile whose model is missing still shows its minimap image (the Issues
+  page reports it).
 - A tile whose tileset (.set) or minimap image was not found is drawn light grey (never black: black is what the game
   draws for rock and dense forest).
 - The layout trusts transition positions. A transition that leaves within EDGE_M of an edge and arrives within ARRIVE_M
@@ -61,6 +65,8 @@ ARRIVE_M = 40.0               # the arrival end may sit this far in from the opp
 GREY = (90, 90, 90)
 MISSING_FILL = (150, 150, 150)     # a tile with no minimap image (render_area)
 MISSING_EDGE = (110, 110, 110)
+HOLE_FILL = (170, 45, 45)          # a hole: a tile the tileset doesn't have, or a tile position with no tile
+HOLE_EDGE = (110, 25, 25)
 SIDES = ("north", "east", "south", "west")
 OPPOSITE = {"north": "south", "south": "north", "east": "west", "west": "east"}
 
@@ -283,14 +289,28 @@ def render_area(area, set_tiles, texture, px=16):
 
     area: dict(Width, Height, tiles=[[Tile_ID, Tile_Orientation, Tile_Height], ...] in .are order); set_tiles: the
     tileset's parse_set() result or None; texture(name) -> decoded texture or None; px: pixels per tile.
-    stats: dict(tiles, drawn, no_set, no_texture) - how many cells could not be drawn and why."""
+    stats: dict(tiles, drawn, no_set, no_texture, holes) - how many cells could not be drawn and why. Each cell is drawn
+    on its own, so a hole (a tile number the tileset doesn't have, or a position the tile list doesn't fill) is drawn
+    dark red and the rest of the area still draws."""
     W, H = int(area.get("Width") or 0), int(area.get("Height") or 0)
     cv = Canvas(max(1, W * px), max(1, H * px), GREY)
-    st = dict(tiles=W * H, drawn=0, no_set=0, no_texture=0)
-    for i, t in enumerate(area.get("tiles", [])[:W * H]):
+    st = dict(tiles=W * H, drawn=0, no_set=0, no_texture=0, holes=0)
+    tiles = area.get("tiles", [])[:W * H]
+
+    def hole(X, Y):
+        st["holes"] += 1
+        cv.fill(X, Y, px, px, HOLE_EDGE)
+        if px > 2:
+            cv.fill(X + 1, Y + 1, px - 2, px - 2, HOLE_FILL)
+    for i in range(len(tiles), W * H):               # positions the tile list doesn't reach (tile_holes: "empty")
+        hole((i % W) * px, (H - 1 - i // W) * px)
+    for i, t in enumerate(tiles):
         tid, ori = t[0], t[1]
         x, y = i % W, i // W
         X, Y = x * px, (H - 1 - y) * px               # tile rows run south to north; images run top (north) down
+        if set_tiles is not None and tid not in set_tiles:
+            hole(X, Y)                                # the tileset has no [TILE<id>] section (tile_holes: "unknown")
+            continue
         name = (set_tiles or {}).get(tid, {}).get("imagemap2d") if set_tiles else None
         tex = texture(name) if name else None
         if tex:
@@ -690,6 +710,92 @@ def area_environment(areas, sets, links, env_scripts):
     return out
 
 
+def tile_holes(areas, tilesets, res):
+    """{area: dict(tiles, unknown, no_model, empty)} for areas with holes - the three ways an area can have a tile
+    with nothing there (a tester's report, 2026-10-27; none can be made in the toolset, only by editing files by hand
+    or by using another version of a tileset than the area was built with):
+      unknown   {tile id: tiles} - the area names a tile number its tileset's .set has no [TILE<id>] section for;
+      no_model  {model: tiles} - the .set's tile names a model (.mdl) no hak, the module or the game has, or none
+                ("(none)");
+      empty     tile positions (Width x Height) the area's tile list doesn't fill.
+    areas / tilesets: load_world() / load_tilesets(); an area whose tileset wasn't found is only checked for empty
+    positions (area_tileset_missing covers the rest). res: Resources, for where() on models (names only, nothing is
+    read). Never raises on odd data."""
+    have = {}
+    out = {}
+    for r, a in areas.items():
+        W, H = _int(a.get("Width")), _int(a.get("Height"))
+        t = tilesets.get((a.get("Tileset") or "").lower())
+        unknown, no_model = defaultdict(int), defaultdict(int)
+        if t:
+            for tid, _o, _h in a["tiles"][:W * H]:
+                row = t["tiles"].get(tid)
+                if row is None:
+                    unknown[tid] += 1
+                    continue
+                model = row.get("model") or ""
+                if not model:
+                    no_model["(none)"] += 1
+                    continue
+                if model not in have:
+                    have[model] = res.where(model, ("mdl",)) is not None
+                if not have[model]:
+                    no_model[model] += 1
+        empty = max(0, W * H - len(a["tiles"]))
+        if unknown or no_model or empty:
+            out[r] = dict(tiles=W * H, unknown=dict(unknown), no_model=dict(no_model), empty=empty)
+    return out
+
+
+def _counts(d):
+    """'812 (3), 813 (1)' - names or numbers with their tile counts, most first, the first eight."""
+    items = sorted(d.items(), key=lambda kv: (-kv[1], str(kv[0])))
+    txt = ", ".join(f"{k} ({v})" for k, v in items[:8])
+    return txt + (f" and {len(items) - 8} more" if len(items) > 8 else "")
+
+
+def hole_issues(areas, holes, set_source=None, hint=""):
+    """Error findings (transitions() format) for tile_holes(): checks tile_unknown, tile_model_missing, tile_empty,
+    one per area and kind. hint: added to tile_model_missing when a listed hak wasn't found or the base game wasn't
+    read - the model may be there, so that finding is then a note. Never raises; reads nothing."""
+    out = []
+    for r, h in sorted(holes.items()):
+        a = areas.get(r, {})
+        nm, ts = a.get("Name") or r, (a.get("Tileset") or "").lower()
+        where = (set_source or {}).get(ts) or "?"
+        if h["unknown"]:
+            k = sum(h["unknown"].values())
+            out.append(dict(severity="error", check="tile_unknown", area=r, object=f"tileset {ts}",
+                            detail=f"{k} of {h['tiles']} tiles in {nm} name tile numbers that tileset {ts} ({ts}.set "
+                                   f"from {where}) doesn't have: {_counts(h['unknown'])}. Those tiles have nothing to "
+                                   "draw or walk on: a hole in the area.",
+                            fix=f"Usually the area was built with another version of the {ts} tileset: use the hak "
+                                "version it was made with, or open the area in the toolset and paint those tiles again."))
+        if h["no_model"]:
+            k = sum(h["no_model"].values())
+            only_none = set(h["no_model"]) == {"(none)"}
+            out.append(dict(severity="info" if hint and not only_none else "error", check="tile_model_missing", area=r,
+                            object=f"tileset {ts}",
+                            detail=f"{k} of {h['tiles']} tiles in {nm} use tiles of {ts}.set (from {where}) whose model "
+                                   + ("is not named in the .set" if only_none else "no hak, the module or the game has")
+                                   + f": {_counts(h['no_model'])}. The game has nothing to draw there: a hole in the "
+                                   "area." + ("" if only_none else hint),
+                            fix=f"Add the missing tile models (.mdl, with their .wok walkmeshes) to the hak that "
+                                f"provides {ts}.set ({where}) or to a hak listed above it; '(none)' means the .set's "
+                                "[TILE] section has no Model line - fix the .set."))
+        if h["empty"]:
+            out.append(dict(severity="error", check="tile_empty", area=r, object="tile list",
+                            detail=f"{h['empty']} of {h['tiles']} tile positions in {nm} hold no tile: the area is "
+                                   f"{_int(a.get('Width'))} x {_int(a.get('Height'))} tiles but its tile list has "
+                                   f"{h['tiles'] - h['empty']}. The toolset never does this - the area file was edited "
+                                   "by hand or is damaged. The missing positions are at the north end (the list runs "
+                                   "row by row from the south-west corner).",
+                            fix="Restore the area file (.are) from a backup or the original download; if it was edited "
+                                "by hand, add the missing Tile_List entries (one per tile, row by row from the "
+                                "south-west corner)."))
+    return out
+
+
 def minimap_issues(areas, stats, set_source=None):
     """Error findings for tiles the in-game minimap shows blank: the tileset names a minimap image that no hak,
     the module or the base game has. One finding per area (the owner, 2026-10-10: a missing minimap image is an
@@ -720,7 +826,7 @@ def minimap_issues(areas, stats, set_source=None):
 # ============================================================================================ reading an analysis
 # Everything below works from an analysis folder (index.sqlite + meta) so the toolkit can check and draw any module.
 # Nothing here writes outside <analysis>/maps; the module, its haks and the game are only read.
-MAP_VERSION = 1               # bump when map.json changes shape, so older saved maps are rebuilt
+MAP_VERSION = 2               # bump when map.json changes shape, so older saved maps are rebuilt (2: holes)
 MAP_PX = 8                    # pixels per tile on the Map page (the owner's default, 2026-10-10)
 EXPORT_PX = 16                # pixels per tile in a PNG export
 AREA_KEEP = ("Name", "Tag", "Tileset", "Width", "Height", "Flags", "ChanceRain", "ChanceSnow", "ChanceLightning",
@@ -980,14 +1086,17 @@ def missing_minimaps(areas, tilesets, res):
 
 ISSUE_CATEGORY = {"env_underground_outdoor": "area_underground_outdoor",
                   "env_above_ground_cave": "area_above_ground_cave", "minimap_missing": "minimap_missing",
-                  "tileset_missing": "area_tileset_missing", "tileset_unreadable": "area_tileset_unreadable"}
+                  "tileset_missing": "area_tileset_missing", "tileset_unreadable": "area_tileset_unreadable",
+                  "tile_unknown": "area_tile_unknown", "tile_model_missing": "area_tile_model_missing",
+                  "tile_empty": "area_tile_empty"}
 
 
-def area_checks(areas, tilesets, mm, res, haks_missing=()):
-    """Findings (transitions() format) about areas' tilesets and minimap images - the same list for the Issues page
-    (map_checks) and the Map page (build_maps), so the two always agree.
+def area_checks(areas, tilesets, mm, res, haks_missing=(), holes=None):
+    """Findings (transitions() format) about areas' tilesets, tiles and minimap images - the same list for the Issues
+    page (map_checks) and the Map page (build_maps), so the two always agree.
 
-    mm: missing_minimaps() result (names only). res: the Resources used (base_known, unreadable). haks_missing: hak
+    mm: missing_minimaps() result (names only). holes: tile_holes() result (worked out here when None). res: the
+    Resources used (base_known, unreadable). haks_missing: hak
     names module.ifo lists that were not found. While the base game wasn't read or a listed hak is missing, a missing
     file may simply be there: such findings are notes that say so (the same rule as the other "missing" checks)."""
     hint = ""
@@ -998,11 +1107,13 @@ def area_checks(areas, tilesets, mm, res, haks_missing=()):
         hint += (" The base game was not read (set the game folder in Settings and analyse again) - the missing files "
                  "may be there.")
     out = []
-    for f in minimap_issues(areas, mm, {k: v["where"] for k, v in tilesets.items() if v}):
+    src = {k: v["where"] for k, v in tilesets.items() if v}
+    for f in minimap_issues(areas, mm, src):
         if hint:
             f["severity"] = "info"
             f["detail"] += hint
         out.append(f)
+    out += hole_issues(areas, tile_holes(areas, tilesets, res) if holes is None else holes, src, hint)
     for r, a in sorted(areas.items()):
         ts = (a.get("Tileset") or "").lower()
         if not ts or tilesets.get(ts) is not None:
@@ -1035,7 +1146,7 @@ def map_checks(db, nwn_root=None, label=None):
     db: the analysis index; nwn_root: the game folder (to read base-game tilesets); label(node) -> readable label
     (the analysis graph's), optional. issues: dict(severity, category, node, label, detail, fix) - transitions
     (category transition_<check>, node inst:<area>:<path>), areas set to Underground by mistake and the reverse,
-    minimap images that don't exist, and areas whose tileset can't be found. summary: counts for report.json.
+    minimap images that don't exist, holes in an area's tiles (tile_holes), and areas whose tileset can't be found. summary: counts for report.json.
     Draws nothing (that is build_maps, on first use of the Map page). Never raises; a failure inside comes back as
     summary["error"]."""
     label = label or (lambda nid: nid)
@@ -1048,7 +1159,8 @@ def map_checks(db, nwn_root=None, label=None):
             links, finds = transitions(areas, objects)
             envf = area_environment(areas, tilesets, links, env_scripts(db))
             mm = missing_minimaps(areas, tilesets, res)
-            area = area_checks(areas, tilesets, mm, res, _haks_missing(db))
+            holes = tile_holes(areas, tilesets, res)
+            area = area_checks(areas, tilesets, mm, res, _haks_missing(db), holes)
         finally:
             res.close()
         for f in finds:
@@ -1063,7 +1175,7 @@ def map_checks(db, nwn_root=None, label=None):
                                detail=f["detail"], fix=f["fix"]))
         summary = dict(areas=len(areas), transitions=len(links), edge_links=sum(1 for x in links if x["kind"] == "edge"),
                        minimap_missing_tiles=sum(sum(s["missing"].values()) for s in mm.values()),
-                       minimap_missing_areas=len(mm))
+                       minimap_missing_areas=len(mm), tile_hole_areas=len(holes))
     except Exception as ex:  # noqa - a check must never stop the analysis
         return issues, dict(error=f"map checks failed: {ex}")
     return issues, summary
@@ -1179,7 +1291,7 @@ def build_maps(analysis, progress=None):
         A = {r: dict(name=a.get("Name") or r, w=_int(a.get("Width")), h=_int(a.get("Height")), ts=a.get("Tileset") or "",
                      flags=_int(a.get("Flags")), region=region_of.get(r, 0), drawn=stats[r]["drawn"],
                      tiles=stats[r]["tiles"], missing=stats[r].get("missing", {}),
-                     no_set=stats[r]["no_set"]) for r, a in areas.items()}
+                     no_set=stats[r]["no_set"], holes=stats[r]["holes"]) for r, a in areas.items()}
         L = [dict(s=x["src_area"], d=x["dst_area"], k=x["kind"], side=x["side"], o=x["src"]["tag"] or x["src"]["path"],
                   ok=x["src"]["kind"].replace(" List", "").replace("List", ""), to=x["dst"]["tag"],
                   ps=[round(v, 1) for v in x["p_src"]], pd=[round(v, 1) for v in x["p_dst"]]) for x in links]
@@ -1208,6 +1320,7 @@ def build_maps(analysis, progress=None):
                        edge=sum(1 for x in L if x["k"] == "edge"), tiles=tiles, drawn=drawn,
                        missing_tiles=sum(sum(s_["missing"].values()) for s_ in mm.values()),
                        no_set=sum(s["no_set"] for s in stats.values()), base_game=res.base_known,
+                       holes=sum(s["holes"] for s in stats.values()),
                        tilesets_missing=sorted(k for k, v in tilesets.items() if v is None))
         data = dict(version=MAP_VERSION, px=MAP_PX, summary=summary, regions=R, areas=A, links=L, checks=C,
                     entry=module.get("entry_area", ""))

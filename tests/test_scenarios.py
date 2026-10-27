@@ -801,12 +801,24 @@ def analyse_reads_override(tmp):
                                            Mod_Area_list=(LST, [st(6, Area_Name=(R, "yard"))]))))
     w(mod, "yard.are", n.write_gff(root("ARE ", Name=loc("Yard"), Tag=(X, "YARD"), ResRef=(R, "yard"), Tileset=(R, "tcn01"))))
     w(os.path.join(user, "override"), "zz_ovr.2da", "2DA V2.0\n\n   Label\n0  a\n")
+    # a backup of the same 2da in a subfolder, one row different (a tester's report, 2026-10-28: "override beats
+    # override" for a file that "only exists in the override folder")
+    os.makedirs(os.path.join(user, "override", "old"))
+    w(os.path.join(user, "override", "old"), "zz_ovr.2da", "2DA V2.0\n\n   Label\n0  b\n")
     with contextlib.redirect_stdout(io.StringIO()):
         rc = nwn_analyse.main([mod, "--name", "ovr_test", "--nwn-user", user, "--no-json"])
     db = os.path.join(ws, "ovr_test", "index.sqlite")
     kinds = {r[0] for r in sqlite3.connect(db).execute("SELECT kind FROM sources")} if os.path.isfile(db) else None
     check("analyse: a run started like the dashboard's (no override option) reads the user's override folder",
           (rc or 0) == 0 and kinds and "override" in kinds, (rc, kinds))
+    rp = os.path.join(ws, "ovr_test", "report.json")
+    iss = json.load(open(rp, encoding="utf-8"))["issues"] if os.path.isfile(rp) else []
+    same = [i for i in iss if i["category"] == "2da_same_folder"]
+    check("two copies of a 2da in one folder: one 2da_same_folder warning naming the subfolder, with a fix",
+          len(same) == 1 and same[0]["severity"] == "warning" and "override/old" in same[0]["detail"]
+          and same[0].get("fix"), same)
+    check("two copies of a 2da in one folder: never 'override beats override'",
+          not [i for i in iss if "override beats override" in i.get("detail", "")], [i["detail"] for i in iss][:5])
 
 
 def tag_suffix_matching(tmp):

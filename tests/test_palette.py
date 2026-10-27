@@ -186,6 +186,16 @@ def tree_and_names(out):
     # out of date: hat (listed elsewhere), tool and the two twins (not listed); not in a category: lost, crate
     check("palette: the summary counts", pal["summary"] == dict(blueprints=10, unplaced=2, stale=4, hidden=1),
           (pal["summary"], sorted(b["resref"] for b in it["blueprints"] if b.get("stale"))))
+    # the Issues page: blueprints in no category are a note per type (a tester's suggestion, 2026-10-27)
+    with open(os.path.join(out, "report.json"), encoding="utf-8") as fh:
+        rep = json.load(fh)
+    up = [i for i in rep["issues"] if i["category"] == "blueprint_unplaced"]
+    check("issues: blueprints in no palette category are ONE info note for Items, naming the blueprint and its number",
+          len(up) == 1 and up[0]["severity"] == "info" and up[0]["label"] == "Items in no palette category"
+          and "lost (number 255)" in up[0]["detail"] and "1 from the module, 0 from haks" in up[0]["detail"]
+          and "Move selected to" in up[0].get("fix", ""), up)
+    check("issues: a type with no palette file at all (Placeables) gets no note - every blueprint would be listed",
+          not [i for i in up if "Placeables" in i["label"]] and rep.get("palette_notes") == 1, rep.get("palette_notes"))
 
 
 def hak_palette_wins(tmp):

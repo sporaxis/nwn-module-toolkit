@@ -372,6 +372,36 @@ def csv_rows(pal):
     return out
 
 
+def unplaced_issues(pal):
+    """Info notes for the Issues page: per blueprint type, the blueprints whose palette number no category has (a
+    tester's suggestion, 2026-10-27). The game doesn't care - only the toolset palette can't show them, so they are
+    easy to lose - hence a note, not a warning. A type with no categories at all (no palette file found) is skipped:
+    every blueprint would be listed and the type's own note already says why.
+
+    pal: build_palette() data. Returns issue dicts (severity, category blueprint_unplaced, node "module", label,
+    detail, fix). Never raises on odd data; reads nothing."""
+    out = []
+    for ext, t in pal.get("types", {}).items():
+        if not t.get("categories"):
+            continue
+        bps = [b for b in t.get("blueprints", ()) if b.get("cat") is None]
+        if not bps:
+            continue
+        src = pal.get("sources", [])
+        own = sum(1 for b in bps if 0 <= b.get("src", -1) < len(src) and src[b["src"]] == "module")
+        names = ", ".join(f"{b['resref']} (number {b['pid']})" if b.get("pid") is not None else b["resref"]
+                          for b in bps[:8]) + (f" and {len(bps) - 8} more" if len(bps) > 8 else "")
+        out.append(dict(severity="info", category="blueprint_unplaced", node="module",
+                        label=f"{t['label']} in no palette category",
+                        detail=f"{len(bps)} {TYPES[ext][0]} blueprint(s) have a palette number no category of the "
+                               f"{TYPES[ext][0]} palette has ({own} from the module, {len(bps) - own} from haks): "
+                               f"{names}. The game uses them normally, but the toolset palette doesn't show them.",
+                        fix="Blueprints page > Not in any palette category: tick them and use Move selected to... "
+                            "(module blueprints; the next Build & audit applies it). A hak's blueprints are changed "
+                            "in the hak."))
+    return out
+
+
 # a CSV value a spreadsheet can't run as a formula (blueprint names come from haks anyone can make): nwn_csvio.cell
 csv_cell = nwn_csvio.cell
 

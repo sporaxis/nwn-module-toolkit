@@ -86,6 +86,7 @@ def build_catalog(analysis, verbose=True):
     meta = dict(db.execute("SELECT key, value FROM meta").fetchall())
     sources = {sid: dict(path=p, kind=k, priority=pr) for sid, p, k, pr in db.execute("SELECT * FROM sources")}
     files = db.execute("SELECT f.id, f.source_id, f.resref, f.ext, f.size, f.node FROM files f").fetchall()
+    relpaths = dict(db.execute("SELECT id, relpath FROM files"))
 
     # ---- precedence: haks (module.ifo order: first listed wins) > module > override > base game
     def rank(sid):
@@ -100,8 +101,9 @@ def build_catalog(analysis, verbose=True):
         lst.sort()                 # by rank, then source id: the first entry is the copy the game uses
         winners[res] = lst[0]
         for r_, sid, fid, size, node in lst[1:]:
-            shadowed.append(dict(resource=res, loser=os.path.basename(sources[sid]["path"]),
-                                 winner=os.path.basename(sources[lst[0][1]]["path"]), loser_kind=sources[sid]["kind"]))
+            shadowed.append(dict(resource=res, loser=source_name(sources[sid]["path"], relpaths.get(fid)),
+                                 winner=source_name(sources[lst[0][1]]["path"], relpaths.get(lst[0][2])),
+                                 loser_kind=sources[sid]["kind"]))
 
     # ---- which files does the module reach (graph edges from module-sourced nodes)
     # One step only: dst is "referenced" when a node that has a file in the module source points at it.
@@ -304,6 +306,16 @@ def build_catalog(analysis, verbose=True):
     return catalog
 
 
+def source_name(path, relpath):
+    """How a copy is named in messages: the source's file or folder name, plus the subfolder when the copy sits in a
+    subfolder of a folder source ("override/old"). A folder source is read with its subfolders (nwnlib.walk_folder), so
+    two copies of one file can come from the same override or module folder; naming only the folder would read
+    "override beats override" (a tester's report, 2026-10-28). path: the source path; relpath: the file's path inside
+    it (files.relpath; an archive entry's is just its name). Never raises."""
+    sub = os.path.dirname((relpath or "").replace("\\", "/"))
+    return os.path.basename(path) + ("/" + sub if sub else "")
+
+
 def _rows(text):
     """Parse 2da text into (columns, {row number: {column: value}}). The row number is the line's position as text
     ("0", "1" ...), which is what the game uses; the first-column label is ignored, as the game does. Raises
@@ -318,7 +330,7 @@ def twoda_conflicts(db, sources, rank, base):
 
     db: the index (sqlite3 connection). sources: {source id: dict(path, kind, priority)}. rank: build_catalog's
     precedence key. base: nwnlib.BaseGame of the install, or None (skips the base-game comparison). Returns a list of dicts with
-    table, kind ("duplicate", "hak-vs-hak", "override", "stale" or "customised"), winner, loser, summary and
+    table, kind ("duplicate", "hak-vs-hak", "override", "same-folder", "stale" or "customised"), winner, loser, summary and
     advice (plus row lists). Each 2da is read again from its source; a copy that can't be read is skipped.
     Read-only."""
     import nwnlib as n
@@ -354,7 +366,7 @@ def twoda_conflicts(db, sources, rank, base):
             except ValueError:
                 continue
             # parsed stays in precedence order (lst was sorted by rank), so parsed[0] is the copy the game uses
-            parsed.append((sid, os.path.basename(sources[sid]["path"]), sources[sid]["kind"], cols, rows))
+            parsed.append((sid, source_name(sources[sid]["path"], relpath), sources[sid]["kind"], cols, rows))
         if not parsed:
             continue
         wsid, wname, wkind, wcols, wrows = parsed[0]
@@ -369,6 +381,17 @@ def twoda_conflicts(db, sources, rank, base):
             adv = []
             if lost:
                 adv.append(f"{len(lost)} row(s) exist only in {lname} and never load")
+            if sid == wsid:
+                # two copies inside one folder (one of them in a subfolder): neither "beats" the other the way a hak
+                # beats the override, and which one the game reads is not certain - it may not read subfolders at all
+                diff = "; ".join(x for x in (f"{len(lost)} row(s) only in {lname}" if lost else "",
+                                             f"{len(differ)} row(s) differ" if differ else "") if x)
+                out.append(dict(table=name, kind="same-folder", winner=wname, loser=lname,
+                                lost_rows=[dict(row=r, label="") for r in lost][:200], differ_rows=differ[:200],
+                                summary=f"two copies of {name}.2da in the same folder: {wname} and {lname} ({diff}). "
+                                        f"The toolkit counts {wname}; the game may not read files in subfolders at all",
+                                advice="keep one copy: delete or move the other out of the folder"))
+                continue
             if differ:
                 adv.append(f"{len(differ)} row(s) differ - {wname}'s version is what the game uses")
             fix = ("swapping the hak order would make " + lname + "'s version win - check its rows cover what " + wname + " has"

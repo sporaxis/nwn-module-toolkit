@@ -79,9 +79,9 @@ def versions():
     check("version: numbers compare as numbers", U.version_tuple("vault 1.10.0") > U.version_tuple("1.9.2") and
           U.version_tuple("development copy") is None)
     check("re-analysis: a report without the 1.4.0 and 1.5.2 checks lists them; a current one lists nothing",
-          [f["key"] for f in U.missing_features({"summary": {}})] == ["asset_duplicates", "merge_rules", "noise_rules", "area_details", "map_checks", "missing_bp_notes"] and
-          U.missing_features({"asset_duplicates": [], "merge_rules": 2, "noise_rules": 2, "area_details": 1, "map_checks": 1, "missing_bp_notes": 1}) == [] and
-          [f["key"] for f in U.missing_features({"asset_duplicates": [], "merge_rules": 2, "noise_rules": 1, "area_details": 1, "map_checks": 1, "missing_bp_notes": 1})] == ["noise_rules"])
+          [f["key"] for f in U.missing_features({"summary": {}})] == ["asset_duplicates", "merge_rules", "noise_rules", "area_details", "map_checks", "missing_bp_notes", "tile_checks", "class_feats", "palette_notes"] and
+          U.missing_features({"asset_duplicates": [], "merge_rules": 2, "noise_rules": 2, "area_details": 1, "map_checks": 1, "missing_bp_notes": 1, "tile_checks": 1, "class_feats": 1, "palette_notes": 1}) == [] and
+          [f["key"] for f in U.missing_features({"asset_duplicates": [], "merge_rules": 2, "noise_rules": 1, "area_details": 1, "map_checks": 1, "missing_bp_notes": 1, "tile_checks": 1, "class_feats": 1, "palette_notes": 1})] == ["noise_rules"])
 
 
 def work_guard(out):

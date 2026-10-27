@@ -1,4 +1,4 @@
-# NWN Module Toolkit 1.5.5
+# NWN Module Toolkit 1.5.6
 
 Analyse, understand and clean up Neverwinter Nights: Enhanced Edition modules - safely.
 

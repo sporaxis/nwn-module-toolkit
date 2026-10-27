@@ -499,6 +499,27 @@ install folder set, or a missing hak) is not judged. The check compares text onl
 | `identifier_load` | A script whose includes bring in close to the compiler's limit of names (about 16,000 in EE; an approximate count) | Split the big include library |
 | `hak_size` | A hak close to or over the 2 GB limit | Split the hak |
 
+**Classes' feat tables.** Each class in `classes.2da` names its feat table (`FeatsTable`: `cls_feat_fight` and so on),
+the list a character picks feats from when levelling up; each row gives a feat by its row number in `feat.2da`. Builders
+report that bad rows cause errors during level-up, typically at the class's 3rd level. The toolkit checks the copies the
+game uses (haks in the module's order, the module, the game - not your override folder), and only custom content: a
+feat table from a hak or the module, or any table when a hak changes `feat.2da`. The game's own tables against the
+game's own `feat.2da` are not judged. One issue per table and kind, naming the rows (row = line position, as the game
+counts):
+
+| Category | Severity | What it means |
+|---|---|---|
+| `class_feat_null` | info | A row with no feat (`FeatIndex` is `****`). A note only: class packs have used empty rows for years without trouble, though some builders link them to a rare level-up error that relogging clears |
+| `class_feat_missing` | warning | A row pointing past the end of `feat.2da`, or at a blank (deleted) feat row. The feat can't be picked, and a character who already has it doesn't see it in the radial menu or the feat list |
+| `class_feat_no_name` | warning | The feat has no name: its `FEAT` column is `****`, or the talk-table entry it names doesn't exist. It shows blank in the level-up list |
+| `class_feat_table_missing` | error | A custom `classes.2da` names a feat table no hak, the module or the game has: the class has no feat list. A note when a hak is missing or the game folder isn't set |
+
+Fix them in the **Hak editor > 2da editor**: give each row a feat that exists, or remove it.
+
+**Blueprints in no palette category** (`blueprint_unplaced`, info): blueprints whose palette number no category of
+their palette has (for example 255). The game uses them normally; only the toolset palette can't show them. One note
+per blueprint type, naming the blueprints. Move them into a category on the **Blueprints** page (5.4.1).
+
 ### 5.3 Scripts
 Every script with a plain-English description, its role (event, conversation, include library…), what triggers it
 and its impact level. Click one to see its source and the **cascade tree**: what calls it and what it calls.
@@ -549,7 +570,8 @@ out of date, and copies hidden by load order.
   same name means different content, so check before treating them as one. **Only names used more than once** is on
   at first.
 - **Not in any palette category**: blueprints whose palette number no category has (for example 255). With no category
-  to sit in they don't appear in the palette, so they are easy to lose - move them into one (below).
+  to sit in they don't appear in the palette, so they are easy to lose - move them into one (below). The Issues page
+  lists them too, as one note per blueprint type (`blueprint_unplaced`).
 - **Note** column: the module's palette file (`itempalcus.itp` and so on) also keeps its own list of which blueprint
   sits where. When that list disagrees with a blueprint's own palette number, the note says so. Which of the two the
   toolset reads when it opens the module isn't something the toolkit has confirmed, so a move (below) sets both. A list
@@ -727,6 +749,8 @@ read.
 - **Grey squares** are tiles whose minimap image exists nowhere (not in the haks, the module or the game): the game
   shows them blank on the minimap too, and each such area is an *error* on the Issues page (see below). **Black** is
   what the game draws black - solid rock, dense forest, pits.
+- **Dark red squares** are holes: a tile number the area's tileset doesn't have, or a tile position the area's tile
+  list doesn't fill. Each tile is drawn on its own, so the rest of the area still shows. Both are *errors* (below).
 - **Red dashed outline**: the area's transitions put it on top of another area. Builders often join areas in ways that
   don't fit a flat grid (a loop that doesn't close, a road that leaves north and arrives east); the area is drawn anyway
   so the world is shown whole, and the Checks tab lists each overlap as a note.
@@ -757,6 +781,9 @@ only *areas overlap on the map* is Map-only.
 | trigger is not a transition (`transition_not_a_transition`) | warning | A trigger with a destination whose type isn't Area Transition |
 | minimap image missing (`minimap_missing`) | error | Tiles whose tileset names a minimap image no hak, the module or the game has: blank on the in-game minimap. Names the tileset, the hak its `.set` comes from, each image and how many tiles use it. A note when the game folder wasn't set (the image may be in the game) |
 | tileset missing (`area_tileset_missing`) | error | No hak, the module or the game has the area's tileset: the area can't load |
+| tile the tileset doesn't have (`area_tile_unknown`) | error | The area names tile numbers its tileset's `.set` has no section for: a hole. Names each number and how many tiles use it. Usually the area was built with another version of the tileset hak |
+| tile model missing (`area_tile_model_missing`) | error | Tiles whose `.set` section names a model (`.mdl`) no hak, the module or the game has, or names none (`(none)`): a hole. A note when a hak is missing or the game folder isn't set (the model may be there) |
+| empty tile positions (`area_tile_empty`) | error | The area is W x H tiles but its tile list is shorter: positions with no tile at all. The toolset never does this; the area file was edited by hand or is damaged |
 | set to Underground but outdoors (`area_underground_outdoor`) | warning | The area's Environment is Underground but the evidence says surface; names the evidence, the area's variables and every script line that asks `GetIsAreaAboveGround` (what the setting changes - sky boxes, map reveals, mounts...). The reverse (`area_above_ground_cave`, a cave set to Above ground) is a note |
 | one-way (`transition_one_way`), way back lands far away (`transition_return_far`), edges don't match (`transition_edge_mismatch`) | note | Worth a look, often intended |
 
@@ -925,11 +952,16 @@ For each hak: the files it carries against the files the module references, 2da 
 (appearance, placeables, baseitems, portraits, soundsets, classes, races, feats, spells…), tilesets and the areas that
 use them, and the load order with the files each source hides from the ones below it (see *Load order* in 16).
 - **2da rows** are counted by their line position, as the game does (see 6.2). A row whose label doesn't match its
-  line gets a `2da_row_label` warning. When several sources carry the same 2da, only the rows of the copy the game
-  loads are listed.
+  line gets a `2da_row_label` warning - unless the game's own copy of that 2da has the same label on that line (some of
+  Beamdog's tables count from 1), or it is a bonus-feat table (`cls_bfeat_*`) numbered 1, 2, 3... all the way down,
+  where row 0 is class level 1. When several sources carry the same 2da, only the rows of the copy the game loads are
+  listed.
 - **Talk table**: used and unused custom entries, and broken string references that would show as blank in game.
 - **2da conflicts**: the same 2da in several haks with the rows that never load, and hak 2das older than your installed
-  game (hidden base rows or columns, plus the customised rows you would need to re-apply).
+  game (hidden base rows or columns, plus the customised rows you would need to re-apply). The toolkit reads a folder
+  with its subfolders, so a copy in a subfolder is named with it (`override/old`). Two copies inside one folder - often
+  a backup kept in a subfolder of the override folder - are a `2da_same_folder` warning: keep one. The game may not
+  read subfolders at all.
 
 ### 5.16 Impact explorer
 Pick anything to see its impact level and the exact chain of references behind it. The chain is worked out when you
