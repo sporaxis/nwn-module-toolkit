@@ -72,7 +72,8 @@ def list_module(module_path, info=None):
         outside = [0]
         res, skipped = nwn_nasher.list_resources(module_path, outside)
         if info is not None:
-            info.update(nasher_outside=outside[0], nasher_sources=nwn_nasher.sources(module_path))
+            info.update(nasher_outside=outside[0], nasher_sources=nwn_nasher.sources(module_path),
+                        nasher_unmatched=nwn_nasher.unmatched_includes(module_path))
         items = [(r, e, size) for r, e, size, _rel, _j in res]
         try:
             root = nwn_nasher.read_ifo(module_path)
@@ -286,6 +287,11 @@ def scan(module_path, haks=(), nwn_root=None, nwn_user=None, workspace=None):
         warnings.append(dict(level="info", text=f"nasher project: {plan['nasher_outside']} file(s) outside the sources "
                              f"nasher.cfg packs ({', '.join(plan['nasher_sources']['include'])}) are not part of the "
                              "module and are not read"))
+    for g in plan.get("nasher_unmatched") or ():
+        # a source path that matches nothing leaves that part out of what nasher packs - and out of this analysis
+        warnings.append(dict(level="warning", text=f"nasher project: nasher.cfg includes \"{g}\", which matches no file in "
+                             "the project - check the folder name (that part is left out of the module and of this "
+                             "analysis)"))
     if plan["skipped"]:
         warnings.append(dict(level="info", text=f"{len(plan['skipped'])} non-game file(s) in the module folder are ignored "
                              f"(e.g. {', '.join(plan['skipped'][:3])})"))

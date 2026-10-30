@@ -2,6 +2,12 @@
 nwn_analyse.py - one command: index + analyse a module (no dashboard needed).
 
     python nwn_analyse.py <module folder or .mod> [--hak X.hak ...] [--tlk dialog.tlk] [--name NAME]
+                          [--override FOLDER ...]
+
+--override FOLDER: read one more override folder - typically a copy of the server's override folder, whose loose 2da
+tables and scripts the server's scripts read (a PW's loot tables kept there make their items count as in use). Read
+only; counted for what uses what, never for builds. Remembered for the analysis (<name>/extra_overrides.json, also set
+on the dashboard's Overview > Server override folders), so Analyse again reads it too.
 
 Results go to nwn_workspace/<name>/ (report.json, reports/*.csv, conversations/, json/),
 the same place the dashboard uses, so you can open them there afterwards.
@@ -60,6 +66,9 @@ def main(argv=None):
     ap.add_argument("--hak", action="append", default=[], help="a hak the module uses (repeat for each); haks the "
                     "module lists are also looked up in the NWN folders")
     ap.add_argument("--tlk", help="the module's custom talk table (.tlk)")
+    ap.add_argument("--override", action="append", default=[], metavar="FOLDER",
+                    help="one more override folder to read, e.g. a copy of the server's (repeat for each); remembered "
+                         "for this analysis")
     ap.add_argument("--name", help="analysis name (default: from the module's file or folder name)")
     ap.add_argument("--nwn-root", help="NWN install folder: exact base-game checks and hak lookup")
     ap.add_argument("--nwn-user", help="NWN user folder (Documents/Neverwinter Nights): hak lookup")
@@ -69,7 +78,7 @@ def main(argv=None):
     ap.add_argument("--progress", action="store_true", help="print machine-readable progress lines (used by the dashboard)")
     ap.add_argument("--version", action="version", version=f"NWN Module Toolkit {nwn_dashboard.VERSION}")
     a = ap.parse_args(argv)
-    gone = [p for p in [a.module] + a.hak + ([a.tlk] if a.tlk else []) if not os.path.exists(p)]
+    gone = [p for p in [a.module] + a.hak + ([a.tlk] if a.tlk else []) + a.override if not os.path.exists(p)]
     if gone:
         print(f"Not found: {gone[0]} - check the path (put it in quotes if it contains spaces)")
         return 2
@@ -110,9 +119,16 @@ def _run(a, name, out):
         # run_index returns None when the time budget ran out; it has saved its state to resume from next time.
         # overrides=None: the user folder's override folder is read when it has files (the game loads it too);
         # [] would mean "no override folder", which only the clean-build audit wants.
+        # extra override folders: the ones saved for this analysis (Overview > Server override folders) plus any
+        # --override, which is saved too so that Analyse again reads it as well
+        extra = nwn_index.load_extra_overrides(out)
+        new = [os.path.abspath(o) for o in a.override if os.path.abspath(o) not in extra]
+        if new:
+            extra = nwn_index.save_extra_overrides(out, extra + new)
         r = nwn_index.run_index(a.module, a.hak, None, a.tlk, out, write_json=not a.no_json,
                                 nwn_root=a.nwn_root or st["nwn_root"] or None,
-                                nwn_user=a.nwn_user or st["nwn_user"] or None, time_budget=a.budget)
+                                nwn_user=a.nwn_user or st["nwn_user"] or None, time_budget=a.budget,
+                                extra_overrides=extra)
         if r is None:
             print("CHECKPOINT - run the same command again to continue")
             return 3

@@ -225,6 +225,50 @@ def test_hostile(tmp):
     except n.GffError:
         ok_ = True
     check("a GFF whose list points back at itself is refused", ok_)
+    # a struct two places point at (written by tools other than the toolset; a tester's tileset palette): read, each
+    # place with its own copy - and the copies are independent, as if the file held the struct twice
+    from _gff import raw_gff
+    reuse = raw_gff([(0, [0]), (5, [1])], [(n.LIST, 0, 0), (n.INT, 1, 7)], ["LIST", "ID"],
+                    struct.pack("<4I", 3, 1, 1, 1))
+    try:
+        r_ = n.read_gff(reuse)
+        kids = r_.get("LIST")
+        kids[0].set("ID", n.INT, 9)
+        ok_ = [k.get("ID") for k in kids] == [9, 7, 7] and kids[1].sid == 5
+        back = n.read_gff(n.write_gff(r_))
+        ok_ = ok_ and [k.get("ID") for k in back.get("LIST")] == [9, 7, 7]
+    except n.GffError as ex:
+        ok_ = str(ex)
+    check("a struct three list entries point at is read (three copies, independent) and writes back as a plain GFF", ok_ is True, ok_)
+    # a small file whose 20,000 list entries all point at one struct holding a 200 KB string (an adversarial test,
+    # 2026-10-30): 4 GB of copies if read - refused by the field-data budget, quickly and small
+    big = b"x" * 200_000
+    many = struct.pack("<I", 20_000) + struct.pack("<20000I", *([1] * 20_000))
+    amp = raw_gff([(0, [0]), (1, [1])], [(n.LIST, 0, 0), (n.CEXOSTRING, 1, 0)], ["LIST", "S"], many,
+                  fdata=struct.pack("<I", len(big)) + big)
+    t_ = time.time()
+    try:
+        n.read_gff(amp)
+        ok_ = "read"
+    except n.GffError as ex:
+        ok_ = "field data is reused" in str(ex)
+    check("a GFF whose list points 20,000 times at one 200 KB string is refused (field-data budget), fast",
+          ok_ is True and time.time() - t_ < 3, (ok_, round(time.time() - t_, 2)))
+    # a GFF bomb: 40 structs, each listing the next one twice (2^40 structs); and the same padded with 8,000 structs
+    def bomb(levels, filler=0):
+        fields, lists = [], b""
+        for i_ in range(levels - 1):
+            fields.append((n.LIST, 0, len(lists)))
+            lists += struct.pack("<3I", 2, i_ + 1, i_ + 1)
+        return raw_gff([(0, [i_]) for i_ in range(levels - 1)] + [(0, [])] * (1 + filler), fields, ["LIST"], lists)
+    for lv, fill, lim in ((40, 0, 1), (40, 8000, 3)):
+        t0 = time.time()
+        try:
+            n.read_gff(bomb(lv, fill)); ok_ = False
+        except n.GffError as ex:
+            ok_ = "expand without limit" in str(ex)
+        check(f"a GFF bomb ({lv} levels, {fill} more structs) is still refused", ok_)
+        h.timing(f"a GFF bomb ({lv} levels, {fill} more structs) is refused quickly", time.time() - t0, lim)
     bad = os.path.join(tmp, "count.mod")
     hdr = b"MOD V1.0" + struct.pack("<9I", 0, 0, 50_000_000, 160, 160, 160, 0, 0, 0) + b"\0" * 116
     with open(bad, "wb") as fh:

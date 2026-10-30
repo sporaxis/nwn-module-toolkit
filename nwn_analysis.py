@@ -183,6 +183,7 @@ class Graph:
 
     db: the analysis index, sqlite3.Connection (kept as self.db). Attributes:
         nodes   {node id: dict(type, name, label, file_id, in_module)}
+        override_pairs {(src, dst)} references read only from override folders' copies (see nwn_index)
         fwd     {src: [(dst, kind, via)]}   what each node uses
         rev     {dst: [(src, kind, via)]}   who uses each node
         parent  {child: parent}              from "contains" edges (area -> placed object -> its inventory)
@@ -209,6 +210,13 @@ class Graph:
             if k == "contains":
                 self.parent[d] = s
         self._live = (None, None)       # (server_values, live set) of the last live() call
+        # (src, dst) pairs every reference between which came from an override folder's copy (nwn_index
+        # override_edges); an index from before 1.5.7 has no such table: none then
+        try:
+            self.override_pairs = set(db.execute("SELECT src, dst FROM override_edges"))
+            self.has_override_pairs = True
+        except sqlite3.Error:
+            self.override_pairs, self.has_override_pairs = set(), False
 
     def label(self, nid):
         """Readable label of a node, or the id itself for a node the graph doesn't have."""
@@ -486,15 +494,19 @@ class Graph:
         return root
 
     # ------------------------------------------------------------ reachability
-    def reachable(self, roots):
+    def reachable(self, roots, avoid=()):
         """Every node reachable from `roots` (an iterable of node ids) by following edges forward, of any kind.
-        Palette files (.itp) are not walked through. Returns a set that includes the roots. Read-only."""
+        Palette files (.itp) are not walked through, nor the nodes in `avoid` (they are reached, not passed). Returns
+        a set that includes the roots. Read-only."""
+        avoid = set(avoid)
         seen = set(roots)
         q = deque(roots)
         while q:
             cur = q.popleft()
             if cur.startswith("file:") and cur.endswith(".itp"):
                 continue  # palettes list every blueprint - not a real use
+            if cur in avoid:
+                continue
             for dst, kind, via in self.fwd.get(cur, []):
                 if dst not in seen:
                     seen.add(dst); q.append(dst)
@@ -803,6 +815,42 @@ def _script_found(g, name):
     """Does a script of this name exist in the module, a loaded hak or the loaded base game? (the graph's node)"""
     nd = g.nodes.get(f"script:{str(name).lower()}") if g is not None else None
     return bool(nd and nd.get("in_module"))
+
+
+# the index's detail for an include no loaded source has (nwn_index: '#include "x" not found in module (line 5)')
+def PROTOTYPE_RE(fn):
+    """Regex for a prototype of function `fn` in NWScript source: a type, the name, a parameter list and ";" with no
+    body (a declaration only; the definition lives in another include). Used by the missing_include check."""
+    return re.compile(r"^\s*(?:int|float|string|object|void|vector|location|effect|event|talent|itemproperty|action|"
+                      r"struct\s+\w+)\s+" + re.escape(fn) + r"\s*\([^)]*\)\s*;", re.M)
+
+
+INCLUDE_NOT_FOUND = re.compile(r'^#include "([^"]+)" not found in module \(line \d+\)$')
+
+
+def include_notes(issues, haks_missing):
+    """When module.ifo lists haks the analysis could not find, a missing #include becomes an info note that names them.
+
+    Why (a tester's report on 1.5.6): a module built on a large script package keeps that package's include scripts
+    in a hak. With the hak not found, every script that includes them was an error - 3,877 of them, all one cause. The
+    include may well be in a missing hak, so this is something to check, not a proven fault (the map checks treat
+    missing minimap images the same way). With every listed hak loaded the error stands: no source the game loads has
+    the include, and the script can't compile. issues: the analysis' issue list, changed in place; haks_missing: the
+    hak names (meta haks_missing). Returns how many were changed."""
+    if not haks_missing:
+        return 0
+    names = ", ".join(haks_missing[:4]) + ("..." if len(haks_missing) > 4 else "")
+    n_ = 0
+    for i in issues:
+        if i["category"] == "missing_include" and i["severity"] == "error" and INCLUDE_NOT_FOUND.match(i["detail"]):
+            i["severity"] = "info"
+            # the build audit still counts it as the error it was: its own analysis of the clean module has the same
+            # haks missing, so without this a build that drops an include the scripts need would look clean
+            i["was"] = "error"
+            i["detail"] += (f" - {len(haks_missing)} hak(s) the module lists were not found ({names}) and it may be "
+                            "in one of them")
+            n_ += 1
+    return n_
 
 
 def missing_script_issues(db, g, not_loaded_hint=""):
@@ -1291,6 +1339,7 @@ def run_analysis(out_dir, verbose=True):
     issues = [dict(severity=s, category=c, node=n_, label=g.label(n_), detail=d)
               for s, c, n_, d in db.execute("SELECT * FROM issues") if c != "missing_script"]
     issues += missing_script_issues(db, g, not_loaded_hint)
+    include_notes(issues, haks_missing)
     for nid, nd in g.nodes.items():
         if nd["in_module"]:
             continue
@@ -1416,6 +1465,15 @@ def run_analysis(out_dir, verbose=True):
         lib_calls.sort()
         for fn, lib in missing_inc:
             ncs_note = " A compiled .ncs of this script is in the module, so it compiled at some point." if has_ncs else ""
+            if not has_main and not has_sc and PROTOTYPE_RE(fn).search(src or ""):
+                # an include that declares the function's prototype and leaves the body to whoever includes it (HCR's
+                # hc_i2_* libraries: "int GFA(string sFeature);" - the main script includes hc_i0_all too). NWScript
+                # compiles that fine, so it is a note (a tester's module, 2026-10-30: six such errors)
+                issues.append(dict(severity="info", category="missing_include", node=nid, label=g.label(nid),
+                                   detail=f"calls {fn}() and declares it ('{fn}(...);' without a body) instead of "
+                                          f"including '{lib}', which defines it: the script that includes this one must "
+                                          f"include '{lib}' as well (a library convention, fine as it is).{ncs_note}"))
+                continue
             if unread:
                 issues.append(dict(severity="info", category="missing_include", node=nid, label=g.label(nid),
                                    detail=f"calls {fn}() (defined in the module in '{lib}', which it does not #include); it "
@@ -2531,7 +2589,9 @@ def run_analysis(out_dir, verbose=True):
     summary["asset_duplicate_groups"] = len(asset_dups)
     report = dict(summary=summary, issues=issues, scripts=scripts, items=items, orphan_instances=orphan_instances,
                   orphans=orphans, skins=skins, ai_findings=ai_findings, performance=performance,
-                  duplicates=dups, merge_rules=2, noise_rules=2, area_details=1, missing_bp_notes=1, map_summary=map_summary,
+                  duplicates=dups, merge_rules=2, noise_rules=2, area_details=1, missing_bp_notes=1, include_notes=1,
+                  override_edges=int(g.has_override_pairs),
+                  map_summary=map_summary,
                   asset_duplicates=asset_dups, deletions=deletions, areas=areas, conversations=convs, conversation_dynamic_starts=dyn_starts[:300], quests=quests,
                   inferred_quests=inferred, var_audit=var_audit, pw_performance=pw_perf, factions=factions, databases=databases,
                   files=file_rows, models=models, hierarchy=g.hierarchy(),

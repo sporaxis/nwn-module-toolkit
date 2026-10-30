@@ -93,7 +93,9 @@ def is_project(path):
 def _cfg_values(text):
     """{section: {key: [values]}} from nasher.cfg text (TOML subset: [section] / [[section]] headers, key = "string"
     or key = ["a", "b"] arrays, possibly over several lines; # comments). Section and key names lower case; the
-    first of a repeated section (several targets) is kept as "<name>", the others as "<name>#2" ... Never raises."""
+    first of a repeated section (several targets) is kept as "<name>", the others as "<name>#2" ... A key given more
+    than once in one section keeps every value, in order - nasher.cfg lists sources that way (include = "a/**",
+    include = "b/**", and one filter = line per file); before 1.5.7 only the last was kept. Never raises."""
     import re
     out, sec, seen = {}, "", {}
     lines = text.splitlines()
@@ -117,7 +119,7 @@ def _cfg_values(text):
         while val.count("[") > val.count("]") and i < len(lines):    # an array over several lines
             val += " " + lines[i].strip()
             i += 1
-        out.setdefault(sec, {})[key] = re.findall(r'"((?:[^"\\]|\\.)*)"', val) or [val.strip()]
+        out.setdefault(sec, {}).setdefault(key, []).extend(re.findall(r'"((?:[^"\\]|\\.)*)"', val) or [val.strip()])
     return out
 
 
@@ -125,7 +127,9 @@ def _glob_re(pattern):
     """A compiled regex for one nasher glob over a relative path with "/" separators: ** any folders (also none),
     * and ? within one name, {a,b} alternatives, [..] character sets. Case-insensitive (Windows projects)."""
     import re
-    p, i, out = pattern.replace("\\", "/").lstrip("./"), 0, ""
+    # three or more stars in a row mean no more than two (nasher treats them so); stacked ".*" would make the regex
+    # engine crawl on a path that doesn't match (an adversarial test, 2026-10-30)
+    p, i, out = re.sub(r"\*{3,}", "**", pattern.replace("\\", "/")).lstrip("./"), 0, ""
     while i < len(p):
         c = p[i]
         if p.startswith("**/", i):
@@ -154,30 +158,55 @@ def _glob_re(pattern):
         else:
             out += re.escape(c)
         i += 1
-    return re.compile("^" + out + "$", re.I)
+    try:
+        return re.compile("^" + out + "$", re.I)
+    except re.error:
+        # a [..] set the regex engine refuses ("[]", "[z-a]"): nasher wouldn't match it either - treat it as matching
+        # nothing (unmatched_includes then reports it) rather than stopping the analysis (an adversarial test, 2026-10-30)
+        return re.compile(r"(?!x)x")
 
 
 def sources_from_text(text):
     """(include, exclude) globs from nasher.cfg text, as sources() reads them; (["**"], []) when it names none."""
+    inc, exc, _flt = _sources(text)
+    return inc, exc
+
+
+def _sources(text):
+    """(include, exclude, filter) from nasher.cfg text: the first target's own sources when it has them, else the
+    package's. include / exclude are globs over the path in the project; filter globs match a file's NAME and keep it
+    out of the packed module (nasher: "filter" - such files are still used to compile scripts, but are not packed;
+    a module built on a script package filters the package's include scripts, which the package's hak provides)."""
     secs = _cfg_values(text)
     for name in ("target.sources", "target", "package.sources", "sources", "package"):
         inc = secs.get(name, {}).get("include")
         if inc:
-            return inc, secs[name].get("exclude", [])
-    return ["**"], []
+            return inc, secs[name].get("exclude", []), secs[name].get("filter", [])
+    return ["**"], [], []
 
 
 def sources(path):
-    """What nasher would pack from the project at `path`: dict(cfg, include [globs], exclude [globs]) from its
-    nasher.cfg - the first target's own sources when it has them, else the package's ([Sources] in older nasher,
-    [package.sources] in newer). cfg is None and include ["**"] (everything) when there is no nasher.cfg or it names
-    no sources. Never raises."""
+    """What nasher would pack from the project at `path`: dict(cfg, include [globs], exclude [globs], filter [name
+    globs]) from its nasher.cfg - the first target's own sources when it has them, else the package's ([Sources] in
+    older nasher, [package.sources] in newer). cfg is None and include ["**"] (everything) when there is no nasher.cfg
+    or it names no sources. Never raises."""
     try:
         with open(os.path.join(path, "nasher.cfg"), encoding="utf-8", errors="replace") as fh:
-            inc, exc = sources_from_text(fh.read())
+            inc, exc, flt = _sources(fh.read())
     except OSError:
-        return dict(cfg=None, include=["**"], exclude=[])
-    return dict(cfg="nasher.cfg", include=inc, exclude=exc)
+        return dict(cfg=None, include=["**"], exclude=[], filter=[])
+    return dict(cfg="nasher.cfg", include=inc, exclude=exc, filter=flt)
+
+
+def unmatched_includes(path):
+    """The include globs of the project's nasher.cfg that match no file at all - usually a mistyped folder
+    (src/module/** for src/modules/**), which leaves that part of the module out of what nasher packs and so out of the
+    analysis. [] when every include matches something, or there is no nasher.cfg. Names only: no file is opened."""
+    src = sources(path)
+    if not src["cfg"]:
+        return []
+    rels = [rel.replace(os.sep, "/") for _full, rel in n.walk_folder(path)]
+    return [g for g in src["include"] if not any(_glob_re(g).match(r) for r in rels)]
 
 
 def list_resources(path, outside=None):
@@ -190,10 +219,12 @@ def list_resources(path, outside=None):
     src = sources(path)
     inc = [_glob_re(g) for g in src["include"]]
     exc = [_glob_re(g) for g in src["exclude"]]
+    flt = [_glob_re(g) for g in src.get("filter", [])]       # matched against the file name only
     items, skipped = [], []
     for full, rel in sorted(n.walk_folder(path), key=lambda x: x[1]):
         relp = rel.replace(os.sep, "/")
-        if not any(r.match(relp) for r in inc) or any(r.match(relp) for r in exc):
+        if not any(r.match(relp) for r in inc) or any(r.match(relp) for r in exc) or \
+                any(r.match(relp.rsplit("/", 1)[-1]) for r in flt):
             if outside is not None:
                 outside[0] += 1
             continue

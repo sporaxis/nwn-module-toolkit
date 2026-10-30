@@ -48,6 +48,51 @@ def sig_matches(stored, detail):
     return str(stored or "").split("; used by ")[0] == issue_sig(detail)
 
 
+# One accepted_issues.json entry per key (category|node|label). One script or object can carry several issues of one
+# category under the same key - a script missing two includes has two missing_include issues - so an entry keeps every
+# accepted signature in "sigs" ({signature: {note, accepted_at}}). Before 1.5.7 an entry held one signature ("sig"),
+# and accepting a second issue of the same key replaced the first, which then came back as "changed since you
+# accepted it" (a tester's report). "sig" is still written (the latest) so older toolkits reading the file keep
+# working as before.
+SIG_MAX = 4000      # characters of a signature that are stored and compared (a very long detail is cut the same way)
+
+
+def _cut(sig):
+    """A stored signature cut at "; used by ", as issue_sig cuts a detail (older signatures held the whole text), and
+    to SIG_MAX characters - the length stored - so storing, matching and un-accepting all compare the same text."""
+    return str(sig).split("; used by ")[0][:SIG_MAX]
+
+
+def sigs_of(entry):
+    """{signature: {note, accepted_at}} of every issue accepted under one accepted_issues.json entry; an old entry
+    gives its one "sig". Never raises for a damaged entry (it gives {})."""
+    if not isinstance(entry, dict):
+        return {}
+    out = {}
+    for k, v in (entry.get("sigs") or {}).items() if isinstance(entry.get("sigs"), dict) else ():
+        v = v if isinstance(v, dict) else {}
+        out[_cut(k)] = dict(note=v.get("note") or "", accepted_at=v.get("accepted_at"))
+    if entry.get("sig") is not None:
+        # the top-level sig is the latest accepted (apply_issue_plan writes it so); keep it last in the order, with its
+        # own time when "sigs" has one. An entry an older toolkit wrote has only this one.
+        top = _cut(entry["sig"])
+        old = out.pop(top, None)
+        out[top] = old or dict(note=entry.get("note") or "", accepted_at=entry.get("accepted_at"))
+    return out
+
+
+def entry_sigs(entry):
+    """{signature: note} of every issue accepted under one accepted_issues.json entry (sigs_of without the times)."""
+    return {k: v["note"] for k, v in sigs_of(entry).items()}
+
+
+def accepted_match(entry, detail):
+    """Is the issue with this detail accepted under this entry? Returns its note ("" when it has none), or None."""
+    sigs = entry_sigs(entry)
+    sg = _cut(issue_sig(detail))
+    return sigs[sg] if sg in sigs else None
+
+
 def all_issues(report, compile_result=None):
     """The issues the Issues page lists: the report's, plus one per official-compiler error when the compiler ran
     (compile.json: {"status": "ran", "results": {script: [error lines]}})."""
@@ -99,7 +144,8 @@ def _resolve(rows, value_col, find):
         bad = [x for x in lst if x[2]]
         if bad or len({x[1] for x in lst}) > 1:
             for row, _v, why, _t in lst:
-                refused.append(dict(row=row, item=str(key), why=why or (
+                # an issue's decision key is (key, signature): the page shows the key
+                refused.append(dict(row=row, item=str(key[0] if isinstance(key, tuple) else key), why=why or (
                     f"rows {rows_} disagree about this one" if not bad else
                     f"another row for this one was refused (rows {rows_})")))
             continue
@@ -129,21 +175,29 @@ def plan_issues(issues, accepted, data):
         if not lst:
             return None, None, "no issue with this key in the analysis (export again: it may have been re-run)"
         det = issue_sig(nwn_csvio.uncell(r.get("detail", "")))
-        pick = next((i for i in lst if issue_sig(i["detail"]) == det), lst[0]) if det else lst[0]
-        return k, (pick, nwn_csvio.uncell(r.get("note", ""))), None
+        pick = next((i for i in lst if issue_sig(i["detail"]) == det), None) if det else lst[0]
+        if pick is None:
+            if len(lst) > 1:     # several issues under this key and the row's detail names none of them: never guess
+                return None, None, (f"none of the {len(lst)} issues under this key has this detail any more "
+                                    "(export again)")
+            pick = lst[0]        # the one issue of the key, its text changed since the export
+        # one decision per issue, not per key: two rows of one key with different details are two issues (a script
+        # missing two includes), not a repeated row
+        return (k, issue_sig(pick["detail"])), (pick, nwn_csvio.uncell(r.get("note", ""))), None
     dec, refused, unchanged, dupes = _resolve(rows, "by_design", find)
     out = dict(rows=len(rows), accept=[], unaccept=[], refused=refused, duplicates=dupes)
-    for k, (v, (i, note), row) in dec.items():
+    for (k, _sg), (v, (i, note), row) in dec.items():
         cur = accepted.get(k)
         sig = issue_sig(i["detail"])
+        have = accepted_match(cur, i["detail"])          # this issue's note when it is accepted, else None
         if v:
-            if cur and sig_matches(cur.get("sig"), i["detail"]) and (cur.get("note") or "") == (note or cur.get("note") or ""):
+            if have is not None and have == (note or have):
                 unchanged += 1
             else:
                 out["accept"].append(dict(key=k, sig=sig, category=i["category"], label=i["label"],
-                                          note=note or (cur or {}).get("note", ""), row=row))
-        elif cur:
-            out["unaccept"].append(dict(key=k, label=i["label"], row=row))
+                                          note=note or have or (cur or {}).get("note", ""), row=row))
+        elif have is not None:
+            out["unaccept"].append(dict(key=k, sig=sig, label=i["label"], row=row))
         else:
             unchanged += 1
     out["unchanged"] = unchanged
@@ -153,14 +207,35 @@ def plan_issues(issues, accepted, data):
 
 
 def apply_issue_plan(accepted, plan, now):
-    """The accepted_issues.json contents after a plan: accept entries added (text fields length-capped as the
-    single-issue tick does), unaccept entries removed. now: the time text to record. Returns a new dict."""
+    """The accepted_issues.json contents after a plan (text fields length-capped as the single-issue tick does).
+
+    An accept entry adds its signature to the key's entry - others accepted under the same key stay (see sigs_of). An
+    unaccept entry with a sig removes just that one, and the key when none is left; without a sig it removes the whole
+    key. "sig" / "note" keep the latest one, so an older toolkit reading the file works as it did. now: the time text
+    to record. Returns a new dict; the given one is not changed."""
     out = dict(accepted)
+
+    def store(key, base, sigs):
+        if not sigs:
+            out.pop(key, None)
+            return
+        last = list(sigs)[-1]
+        out[key] = dict(base, sig=last, note=sigs[last]["note"], sigs=sigs)
     for a in plan["accept"]:
-        out[a["key"]] = dict(sig=str(a["sig"])[:4000], note=str(a.get("note") or "")[:2000],
-                             category=str(a["category"])[:200], label=str(a["label"])[:500], accepted_at=now)
+        sigs = sigs_of(out.get(a["key"]))
+        sg = _cut(a["sig"])
+        sigs.pop(sg, None)                               # re-accepting moves it to the end (the latest)
+        sigs[sg] = dict(note=str(a.get("note") or "")[:2000], accepted_at=now)
+        store(a["key"], dict(category=str(a["category"])[:200], label=str(a["label"])[:500], accepted_at=now), sigs)
     for u in plan["unaccept"]:
-        out.pop(u["key"], None)
+        old = out.get(u["key"])
+        if old is None:
+            continue
+        if not isinstance(old, dict):
+            old = {}                                     # a hand-damaged entry: un-accepting it just removes it
+        sigs = {} if u.get("sig") is None else sigs_of(old)
+        sigs.pop(_cut(u.get("sig") or ""), None)
+        store(u["key"], {k: v for k, v in old.items() if k not in ("sig", "note", "sigs")}, sigs)
     return out
 
 

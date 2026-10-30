@@ -461,7 +461,7 @@ DATA_DIRS = ("json", "conversations", "reports", ".unpack_tmp", "maps", "maps.tm
 # Your own work: only deleted when you tick it (and type the analysis name).
 USER_PARTS = {"edits": ("edits", "palette_moves.json", "blueprint_changes.json"), "build": ("build",),
               "descriptions": ("descriptions.json", "batches", "accepted_issues.json", "server_config.json",
-                               "database.json")}
+                               "database.json", "extra_overrides.json")}
 ACCEPTED = "accepted_issues.json"      # issues you marked "accepted - by design" (kept across re-analysis)
 
 
@@ -803,8 +803,8 @@ def mod_settings(name, configs=None):
     """The Overview's "Module settings & variables" and "Server settings" data for an analysis (read-only).
 
     configs: the loaded server files (as in server_config.json, already masked); None reads them from disk.
-    Returns dict(module, server, configs) where configs lists only each file's name, kind, load time and value
-    count - not the values."""
+    Returns dict(module, server, configs, extra_overrides) where configs lists only each file's name, kind, load
+    time and value count - not the values - and extra_overrides is extra_overrides_view()."""
     import nwn_modsettings
     d = analysis_dir(name)
     p = os.path.join(d, SERVER_CFG)
@@ -815,10 +815,119 @@ def mod_settings(name, configs=None):
     try:
         mod = nwn_modsettings.module_summary(db, dict(var_audit=parts["var_audit"]))
         srv = nwn_modsettings.interpret(configs, db, parts["summary"], parts["unused_scripts"])
+        extra = extra_overrides_view(d, db)
     finally:
         db.close()
-    return dict(module=mod, server=srv, configs=[dict(name=c["name"], kind=c["kind"], loaded=c.get("loaded"),
-                                                      count=len(c.get("values") or {})) for c in configs])
+    return dict(module=mod, server=srv, extra_overrides=extra,
+                configs=[dict(name=c["name"], kind=c["kind"], loaded=c.get("loaded"),
+                              count=len(c.get("values") or {})) for c in configs])
+
+
+MAX_EXTRA_OVERRIDES = 8
+COUNT_CAP = 20000      # extra_overrides_view stops counting a folder's files here (a drive root would take minutes)
+
+
+def extra_overrides_view(d, db):
+    """The Overview's "Server override folders" card: each extra override folder saved for analysis folder d
+    (nwn_index.load_extra_overrides) with whether it is there now, how many game files and 2da tables it holds
+    (names only, read-only; counting stops at COUNT_CAP files, shown as "20,000+"), and whether the last analysis
+    read it (meta extra_overrides) - a folder added since needs Analyse again. db: the analysis index, open
+    read-only. Never raises for a folder that can't be listed."""
+    try:
+        row = db.execute("SELECT value FROM meta WHERE key='extra_overrides'").fetchone()
+        read = [os.path.normcase(x) for x in json.loads(row[0])] if row and row[0] else []
+    except (sqlite3.Error, ValueError):
+        read = []
+    out = []
+    for f in nwn_index.load_extra_overrides(d):
+        files = tables = seen = 0
+        there = os.path.isdir(f)
+        if there:
+            for full, _rel in n.walk_folder(f):
+                seen += 1
+                if seen > COUNT_CAP:
+                    break
+                ext = full.rpartition(".")[2].lower()
+                if ext in n.EXT_TO_RESTYPE:
+                    files += 1
+                    tables += ext == "2da"
+        out.append(dict(path=f, exists=there, files=files, tables=tables, capped=seen > COUNT_CAP,
+                        read=os.path.normcase(os.path.abspath(f)) in read))
+    return out
+
+
+def _inside(path, folder):
+    """True when path is folder or lies under it - as the folders really are (links resolved; case as the OS
+    compares it), so a link to the workspace is the workspace (an adversarial test, 2026-10-30)."""
+    p_, f_ = os.path.normcase(os.path.realpath(path)), os.path.normcase(os.path.realpath(folder))
+    return p_ == f_ or p_.startswith(f_.rstrip(os.sep) + os.sep)
+
+
+def refuse_override_folder(path, name):
+    """Why `path` must not be read as a server override folder for analysis `name`, or "" when it may (a reviewer's
+    probe, 2026-10-30: "." and the workspace were accepted). Refused: a drive or filesystem root (the index would walk
+    the whole disk), the toolkit's workspace or anything in it (builds, edits and other analyses would be read as
+    game content), the module itself or a folder holding it, the game install and the NWN user folder (its
+    modules/hak folders hold .mod/.hak files the index reads whole, and a .hak there would look loaded). Read-only."""
+    a_ = os.path.abspath(path)
+    if n._is_link(a_):
+        return "that is a link, not the folder itself - paste the path of the folder it points to"
+    if os.path.dirname(os.path.realpath(a_)) == os.path.realpath(a_):
+        return "that is a whole drive - paste the path of the override folder copy itself"
+    if _inside(a_, WORKSPACE) or _inside(WORKSPACE, a_):
+        return "that is the toolkit's workspace, or holds it (analyses, builds and edits live there, not game content)"
+    if _inside(a_, HERE) or _inside(HERE, a_):
+        return "that is the toolkit's own folder, or holds it"
+    try:
+        mp = report_parts(name)["summary"].get("module_path") or ""
+    except Exception:  # noqa - an analysis without a report: nothing more to compare against
+        mp = ""
+    if mp and (_inside(a_, mp) or _inside(mp, a_)):
+        return "that is the module's own folder (or holds it) - the module is read already"
+    s_ = settings()
+    for key, what in (("nwn_root", "the game install folder"), ("nwn_user", "the NWN user folder")):
+        root = s_.get(key)
+        if root and (_inside(a_, root) and not os.path.basename(a_).lower() == "override" or _inside(root, a_)):
+            return f"that is {what} (or inside it) - only its override folder may be read, and it is already"
+    return ""
+
+
+def set_extra_overrides(b):
+    """Overview > Server override folders: save the extra override folders of an analysis - a copy of the server's
+    override folder, read by the next Analyse again (nwn_index.run_index extra_overrides). b: dict(a, folders [paths]).
+    A folder NEW to the list must exist and pass refuse_override_folder (refused otherwise, naming it); one already
+    saved is kept as it is even when it has gone missing, so a missing folder never blocks removing or adding
+    another (a reviewer's probe, 2026-10-30). At most MAX_EXTRA_OVERRIDES; the folders are only read, never written.
+    Writes only <analysis>/extra_overrides.json. Returns mod_settings() for the page."""
+    name = field(b, "a")
+    d = analysis_dir(name)
+    folders = field(b, "folders", list)
+    if len(folders) > MAX_EXTRA_OVERRIDES or not all(isinstance(f, str) for f in folders):
+        raise ValueError(f"field 'folders' must be a list of at most {MAX_EXTRA_OVERRIDES} folder paths")
+    with LOCK:      # two Adds at once: each reads, checks and writes the whole list in turn
+        return _set_extra_overrides(name, d, folders)
+
+
+def _set_extra_overrides(name, d, folders):
+    """set_extra_overrides under the dashboard's LOCK (see there)."""
+    saved = [os.path.normcase(x) for x in nwn_index.load_extra_overrides(d)]
+    keep = []
+    for f in folders:
+        f = f.strip().strip('"')
+        if not f:
+            continue
+        a_ = os.path.abspath(f)
+        if os.path.normcase(a_) not in saved:
+            if not os.path.isdir(a_):
+                raise ValueError(f"not a folder on this computer: {f} - copy the server's override folder here first, "
+                                 "then paste the path of the copy")
+            why = refuse_override_folder(a_, name)
+            if why:
+                raise ValueError(f"not read: {f} - {why}")
+        if os.path.normcase(a_) not in [os.path.normcase(x) for x in keep]:
+            keep.append(a_)
+    nwn_index.save_extra_overrides(d, keep)
+    return mod_settings(name)
 
 
 def load_server_config(b):
@@ -938,7 +1047,8 @@ def load_database(b):
 
 def accept_issue(b):
     """Mark an issue 'accepted - by design' (or undo that). Keyed by category|node|label; `sig` is the detail with
-    numbers masked, so an accepted issue comes back if what it says changes.
+    numbers masked, so an accepted issue comes back if what it says changes. Several issues under one key are kept
+    apart by their sig (nwn_sheets.sigs_of).
 
     b: dict(a, key, accepted, sig, note, category, label) from the Issues page; text fields are length-capped.
     Writes only <analysis>/accepted_issues.json (via .tmp + os.replace, under LOCK so two ticks cannot lose each
@@ -982,7 +1092,8 @@ def accept_issues_many(b):
             plan["accept"].append(dict(key=it["key"], sig=it.get("sig") or "", category=it.get("category") or "",
                                        label=it.get("label") or "", note=b.get("note") or ""))
         else:
-            plan["unaccept"].append(dict(key=it["key"]))
+            # with its sig only that issue is un-accepted; other issues accepted under the same key stay
+            plan["unaccept"].append(dict(key=it["key"], **({"sig": it["sig"]} if isinstance(it.get("sig"), str) else {})))
     return _update_accepted(d, lambda data: nwn_sheets.apply_issue_plan(data, plan, time.strftime("%Y-%m-%d %H:%M")))
 
 
@@ -3073,6 +3184,7 @@ POST_ROUTES = {
     "/api/update/import": api_update_import,
     "/api/database/load": load_database,               # read database files into the snapshot, or clear it
     "/api/serverconfig": load_server_config,            # load or remove a server settings file (secrets masked)
+    "/api/extraoverrides": set_extra_overrides,         # save the extra override folders (a server's override copy)
     "/api/job/stop": lambda b: stop_job(field(b, "id")),
     # Clear a stopped/unfinished analysis's generated files
     "/api/analysis/clear": lambda b: clear_analysis(field(b, "a", str, "")),

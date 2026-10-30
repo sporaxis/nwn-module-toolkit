@@ -60,11 +60,32 @@ def _missing_script(i):
 
 
 def _missing_include(i):
-    """Advice for missing_include. Parses the detail nwn_analysis writes, e.g.
-    "calls GetToken() which is defined in 'inc_tokens' but does not #include it" -> fn GetToken, lib inc_tokens."""
+    """Advice for missing_include. Two kinds share the category:
+    - the include file itself is missing (nwn_index: '#include "inc_x" not found in module (line 5)'; with haks the
+      module lists not found, nwn_analysis.include_notes makes it a note naming them);
+    - a function is called without its include (nwn_analysis: "calls GetToken() which is defined in 'inc_tokens' but
+      does not #include it" -> fn GetToken, lib inc_tokens)."""
     d = i.get("detail", "")
+    inc = re.match(r'#include "([^"]+)" not found', d)
+    if inc:
+        nm = inc.group(1)
+        if "probably base game" in d:
+            return (f"Nothing to do: {nm} comes with the game. Set the NWN install folder in Settings to have it "
+                    "checked rather than guessed from its name.")
+        if "hak(s) the module lists were not found" in d:
+            return (f"Put the hak(s) named here in your hak folder (or set the folder in Settings), then Analyse again: "
+                    f"if {nm}.nss is in one of them, this note goes away. Script packages usually keep their include "
+                    "scripts in a hak of their own.")
+        return (f"No source the game loads has {nm}.nss: not the module, its haks or the base game. If it belongs to a "
+                "script package, add the hak that holds it to the module (toolset: Edit > Module Properties > Custom "
+                f"Content) and Analyse again; otherwise add {nm}.nss to the module, or remove the #include line if the "
+                "script doesn't need it. Until then the script can't be compiled.")
     fn = re.search(r"calls (\w+)\(\)", d)
     lib = re.search(r"defined in (?:the module in )?'([^']+)'", d)
+    if "and declares it (" in d:
+        return ("Nothing to do: the library declares the function and leaves the body to the script that includes it "
+                "(HCR and similar packages work this way). Only if a script that includes this one fails to compile, add "
+                f"#include \"{lib.group(1) if lib else '<the include>'}\" to THAT script.")
     # severity "info" is the variant where an unread (base game / hak) include might define the function
     if i.get("severity") == "info":
         return ("Nothing to do unless the script fails to compile: the function may come from the base-game or hak "
@@ -286,6 +307,10 @@ FIXES = {
                             "a hak or a nwscript.nss this analysis didn't load - then leave it."),
     "2da_row_label": lambda i: ("Renumber the first column to match the line positions (2da editor), then check anything "
                                 "that counted by the old labels."),
+    "source_missing": lambda i: ("Put the hak or override folder back where the analysis found it (or fix the path in "
+                                 "Settings / Overview), then Analyse again."),
+    "override_folder_missing": lambda i: ("Copy the server's override folder to this computer again at that path, or "
+                                          "Overview > Server override folders > remove it; then Analyse again."),
     "symlink_skipped": lambda i: ("Copy the real files into the module folder if they belong to it; links are never "
                                   "followed."),
     "area_without_are": lambda i: ("Delete the leftover .git/.gic files (Safe to delete lists the area as Review: "

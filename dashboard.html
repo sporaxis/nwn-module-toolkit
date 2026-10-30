@@ -1740,6 +1740,17 @@ ${(d.configs || []).map(c => `<span class="chip">${esc(c.name)} · ${esc(c.kind)
     ${(SV.rows || []).length ? `<h3>What the server runs with</h3>${kv(SV.rows.map(r => [r.setting, esc(r.value) + ` <span class="muted">(${esc(r.source)})</span>`]))}` : ""}
     ${(SV.nwnx || []).length ? `<h3>NWNX plugins</h3><div class="tw"><table class="dt small"><thead><tr><th>Plugin</th><th>Switched on</th><th>Scripts that use it</th></tr></thead><tbody>${SV.nwnx.map(p => `<tr><td class="mono">${esc(p.plugin)}</td><td>${p.enabled === true ? '<span class="badge"><i style="background:var(--good)"></i>on</span>' : p.enabled === false ? '<span class="badge"><i style="background:var(--critical)"></i>off</span>' : '<span class="muted">unknown</span>'}</td><td>${p.scripts ? `${fmtN(p.scripts)}: ${p.examples.map(x => nl("script:" + x, x)).join(", ")}` : '<span class="muted">none in use</span>'}${p.unused_scripts ? ` <span class="muted">(+${fmtN(p.unused_scripts)} not used by anything${p.scripts ? "" : ": " + p.examples.map(esc).join(", ")})</span>` : ""}</td></tr>`).join("")}</tbody></table></div>` : ""}
     ${(SV.other || []).length ? `<details><summary class="small">All other values (${SV.other.length})</summary>${kv(SV.other.map(([k, v]) => [k, esc(v)]))}</details>` : ""}
+  </div>
+  <div class="card" id="xovr"><h3 style="margin-top:0">Server override folders</h3>
+    <p class="small">A server's <span class="mono">override</span> folder can hold loose files the module and its haks don't have - 2da tables (loot and random-gear lists, for example) and scripts that the server's scripts read. Read a copy of it here, and the items those tables list count as in use.</p>
+    <ol class="small" style="margin:4px 0 8px 18px;padding:0">
+      <li>Copy the server's <span class="mono">override</span> folder to this computer - with WinSCP or FileZilla, <span class="mono">scp -r</span>, or from a server backup. It is the <span class="mono">override</span> folder inside the server's NWN user folder (where its <span class="mono">modules</span> and <span class="mono">hak</span> folders are). Keep it apart from your own <span class="mono">Documents\\Neverwinter Nights\\override</span>, which your game loads.</li>
+      <li>Paste the path of the copy below and press <b>Add</b>.</li>
+      <li>Press <b>Analyse again</b> (top of this page). Copy the folder again whenever the server's changes.</li>
+    </ol>
+    ${(d.extra_overrides || []).length ? `<div class="tw"><table class="dt small"><thead><tr><th>Folder</th><th>Files</th><th>2da tables</th><th>Status</th><th></th></tr></thead><tbody>${d.extra_overrides.map((x, i) => `<tr><td class="mono">${esc(x.path)}</td><td class="num">${x.exists ? fmtN(x.files) + (x.capped ? "+" : "") : ""}</td><td class="num">${x.exists ? fmtN(x.tables) : ""}</td><td>${!x.exists ? `<span class="badge sv-warning"><i></i>not found</span>` : x.read ? `<span class="badge"><i style="background:var(--good)"></i>read by this analysis</span>` : `<span class="badge sv-warning"><i></i>press Analyse again to read it</span>`}</td><td><a class="nl" href="#" data-xodel="${i}" title="stop reading this folder (the folder itself is not touched)">remove</a></td></tr>`).join("")}</tbody></table></div>` : `<p class="small muted">None yet.</p>`}
+    <div class="row" style="margin-top:6px"><input type="text" id="xoPath" class="wide" placeholder="e.g. C:\\NWN server copies\\live\\override" style="max-width:520px"><button class="btn" id="xoAdd">Add</button><span class="small muted" id="xoMsg"></span></div>
+    <p class="small muted">Only read, never changed. These files count for what uses what - never for Build &amp; audit, because players don't have them. A file in both the module (or a hak) and this folder: the game loads the module's copy; the names in both copies count as in use (keeping more is the safe side).</p>
   </div>`;
   host.querySelectorAll("[data-go]").forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.go); });
   const send = async (name, text) => { $("#srvMsg", host).textContent = "Reading…";
@@ -1750,6 +1761,13 @@ ${(d.configs || []).map(c => `<span class="chip">${esc(c.name)} · ${esc(c.kind)
     send(f.name, await f.text()); };
   $("#srvRead", host).onclick = () => { const t = $("#srvTxt", host).value; if (!t.trim()){ $("#srvMsg", host).textContent = "Paste something first."; return; }
     send(($("#srvName", host).value.trim() || (/^\s*\[/m.test(t) ? "pasted settings.tml" : "pasted env")), t); };
+  // Server override folders: the list is saved per analysis (/api/extraoverrides) and read by the next Analyse again
+  const xoSave = async folders => { $("#xoMsg", host).textContent = "Saving…";
+    try { await post("/api/extraoverrides", {a: S.cur, folders}); modSettings(host); } catch(e){ $("#xoMsg", host).textContent = e.message; } };
+  const xoNow = () => (d.extra_overrides || []).map(x => x.path);
+  $("#xoAdd", host).onclick = () => { const v = $("#xoPath", host).value.trim().replace(/^"|"$/g, "");
+    if (!v){ $("#xoMsg", host).textContent = "Paste the folder's path first."; return; } xoSave([...xoNow(), v]); };
+  host.querySelectorAll("[data-xodel]").forEach(a => a.onclick = e => { e.preventDefault(); xoSave(xoNow().filter((_p, i) => i !== +a.dataset.xodel)); });
   host.querySelectorAll("[data-srvdel]").forEach(a => a.onclick = async e => { e.preventDefault();
     try { await post("/api/serverconfig", {a: S.cur, name: a.dataset.srvdel, clear: true}); modSettings(host); } catch(err){ errorBox(err.message); } });
 }
@@ -1762,10 +1780,35 @@ const accCount = r => (r.issues || []).filter(isAccepted).length;
 const issueKey = i => `${i.category}|${i.node}|${i.label}`;
 // the signature stops at "; used by ": accepting a missing script covers every object that names it, even ones added
 // later (nwn_sheets.issue_sig); a signature stored before that rule is cut the same way, so it still matches
-const sigCore = s => String(s || "").split("; used by ")[0];
-const issueSig = i => sigCore(i.detail).replace(/\d+/g, "#");
-function isAccepted(i){ const a = (S.accepted || {})[issueKey(i)]; return !!a && sigCore(a.sig) === issueSig(i); }
-function acceptedChanged(i){ const a = (S.accepted || {})[issueKey(i)]; return !!a && sigCore(a.sig) !== issueSig(i); }
+// both cut to 4000 characters, the length the server stores (nwn_sheets.SIG_MAX), after the numbers are masked
+const sigCore = s => String(s || "").split("; used by ")[0].slice(0, 4000);
+const issueSig = i => String(i.detail || "").split("; used by ")[0].replace(/\d+/g, "#").slice(0, 4000);
+// One key can hold several accepted issues (a script missing two includes has two missing_include issues): an entry
+// keeps them all in "sigs" ({signature: {note}}); entries saved before 1.5.7 have just "sig" (nwn_sheets.sigs_of).
+// (an object with no prototype, so a detail that happens to read "toString" is never "accepted")
+const accSigs = a => { const o = Object.create(null); if (!a) return o;
+  if (a.sigs && typeof a.sigs === "object" && !Array.isArray(a.sigs)) Object.entries(a.sigs).forEach(([k, v]) => { o[sigCore(k)] = (v && v.note) || ""; });
+  if (a.sig != null && !(sigCore(a.sig) in o)) o[sigCore(a.sig)] = a.note || ""; return o; };
+// the note of an accepted issue ("" when it has none), or null when this issue is not accepted
+function accNote(i){ const s = accSigs((S.accepted || {})[issueKey(i)]), g = issueSig(i); return g in s ? s[g] : null; }
+function isAccepted(i){ return accNote(i) !== null; }
+// The signatures of the issues there are now, per key (report issues plus official-compiler errors), worked out once
+// per report / compile result.
+let curSigsMap = null, curSigsFor = null;
+function curSigs(){
+  const src = [S.rep && S.rep.issues, S.compile];
+  if (!curSigsFor || curSigsFor[0] !== src[0] || curSigsFor[1] !== src[1]){
+    curSigsMap = new Map(); const add = x => { const k = issueKey(x); if (!curSigsMap.has(k)) curSigsMap.set(k, new Set()); curSigsMap.get(k).add(issueSig(x)); };
+    ((S.rep && S.rep.issues) || []).forEach(add);
+    if (S.compile && S.compile.status === "ran") Object.entries(S.compile.results).forEach(([sc, errs]) => errs.forEach(e => add({category: "compile_error", node: "script:" + sc, label: sc, detail: e})));
+    curSigsFor = src;
+  }
+  return curSigsMap;
+}
+// "changed since you accepted it": this issue isn't accepted, and something accepted under its key no longer matches
+// any issue there now - so its text changed. An issue that is simply new next to accepted ones is open, not "changed".
+function acceptedChanged(i){ const a = (S.accepted || {})[issueKey(i)]; if (!a || isAccepted(i)) return false;
+  const here = curSigs().get(issueKey(i)) || new Set(); return Object.keys(accSigs(a)).some(g => !here.has(g)); }
 // Import… on the Issues, Safe to delete and Duplicates pages: pick a CSV, show the server's preview (each row is
 // changed, unchanged or refused with its row number and why) and apply only after OK. url: the upload endpoint (a
 // preview); lines(plan): the "will change" lines; changes(plan): how many changes; apply(plan, file): do it.
@@ -1811,7 +1854,7 @@ VIEWS.issues = (m) => {
     {key:"label", label:"Where", render: i => nl(i.node, i.label)},
     {key:"detail", label:"Detail", render: i => `<span class="small">${esc(i.detail)}</span>${(i.places||[]).length > 1 ? `<details class="small"><summary>All ${i.places.length} places</summary><ul>${i.places.map(p => `<li>${esc(p)}</li>`).join("")}</ul></details>` : ""}${i.fix ? `<div class="small fixhint"><b>How to fix:</b> ${esc(i.fix)}</div>` : ""}${acceptedChanged(i) ? `<br><span class="badge sv-warning"><i></i>changed since you accepted it</span> <span class="small muted">${esc((S.accepted[issueKey(i)]||{}).note||"")}</span>` : ""}`},
     {key:"acc", label:"By design", sort: i => isAccepted(i) ? 1 : 0, render: i => STATIC ? (isAccepted(i) ? "yes" : "") :
-      `<label class="small" title="Accept this issue as intended"><input type="checkbox" data-acc="${esc(issueKey(i))}" ${isAccepted(i)?"checked":""}> ${isAccepted(i) ? esc(S.accepted[issueKey(i)].note || "accepted") : ""}</label>`}]});
+      `<label class="small" title="Accept this issue as intended"><input type="checkbox" data-acc="${esc(issueKey(i))}" data-sig="${esc(issueSig(i))}" ${isAccepted(i)?"checked":""}> ${isAccepted(i) ? esc(accNote(i) || "accepted") : ""}</label>`}]});
   // info notes and accepted issues are hidden unless their tick box is on (or the info severity is picked)
   const draw = f => { cur = f; const vis = rows.filter(i => (!f.sev || i.severity === f.sev) && (!f.cat || i.category === f.cat) &&
       (f.info || f.sev === "info" || i.severity !== "info") && (f.acc || !isAccepted(i)) && has(f.q, i.label, i.detail, i.category));
@@ -1830,7 +1873,7 @@ VIEWS.issues = (m) => {
         items: lst.map(i => ({key: issueKey(i), sig: issueSig(i), category: i.category, label: i.label}))}); renderNav(); draw(cur); }
     catch(e){ errorBox(e.message); } };
   $("#icsv", m).onclick = () => downloadCsv("issues.csv", ["key", "severity", "type", "where", "detail", "fix", "by_design", "note"],
-    shown.map(i => [issueKey(i), i.severity, i.category, i.label, i.detail, i.fix || "", isAccepted(i) ? "yes" : "", isAccepted(i) ? (S.accepted[issueKey(i)].note || "") : ""]));
+    shown.map(i => [issueKey(i), i.severity, i.category, i.label, i.detail, i.fix || "", isAccepted(i) ? "yes" : "", isAccepted(i) ? (accNote(i) || "") : ""]));
   if (!STATIC){
     $("#iacc", m).onclick = () => bulk(true); $("#iun", m).onclick = () => bulk(false);
     $("#iimp", m).onclick = () => sheetImport({url: `/api/issues/import?a=${encodeURIComponent(S.cur)}`, title: "Import by-design decisions",
@@ -1841,9 +1884,10 @@ VIEWS.issues = (m) => {
   }
   function bindAcc(el){
     el.querySelectorAll("[data-acc]").forEach(cb => { cb.onclick = e => e.stopPropagation(); cb.onchange = async () => {
-      const i = rows.find(x => issueKey(x) === cb.dataset.acc); if (!i) return;
+      // key AND signature: one script can have several issues under one key (two missing includes)
+      const i = rows.find(x => issueKey(x) === cb.dataset.acc && issueSig(x) === cb.dataset.sig); if (!i) return;
       let note = "";
-      if (cb.checked){ note = await dialog({title: "Accept as by design", ok: "Accept", input: {placeholder: "why (optional) - e.g. set by the DM tool at run time", value: ((S.accepted||{})[issueKey(i)]||{}).note || ""},
+      if (cb.checked){ note = await dialog({title: "Accept as by design", ok: "Accept", input: {placeholder: "why (optional) - e.g. set by the DM tool at run time", value: accNote(i) ?? (((S.accepted||{})[issueKey(i)]||{}).note || "")},
         html: `<p><b>${esc(i.label)}</b> - ${esc(i.detail)}</p><p>It will be hidden and left out of the issue counts. If what this issue says changes after a re-analysis, it comes back.</p>`});
         if (note == null){ cb.checked = false; return; } }
       try { S.accepted = await post("/api/issues/accept", {a: S.cur, key: issueKey(i), sig: issueSig(i), accepted: cb.checked, note, category: i.category, label: i.label});

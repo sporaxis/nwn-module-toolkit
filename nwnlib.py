@@ -440,6 +440,16 @@ class GffError(Exception):
     pass
 
 
+# A struct may be referenced from more than one place (read_gff gives each place a copy); the tree read may hold at most
+# REUSE_FACTOR times the file's own structs, and at most REUSE_CAP structs (a file with more structs of its own is read
+# whole, without reuse beyond that). Real reuse multiplies a little; a "GFF bomb" multiplies without limit.
+REUSE_FACTOR = 64
+REUSE_CAP = 200_000
+# The same for the field data: each copy of a struct decodes its strings again, so a small file whose structs all
+# point at one big string could demand gigabytes (an adversarial test, 2026-10-30). Decoded field bytes may total at
+# most REUSE_FACTOR times the file's field data block, and never more than REUSE_BYTES_CAP.
+REUSE_BYTES_CAP = 256 * 1024 * 1024
+
 # Reading, writing and converting a GFF recurse once per nested struct, so a file nested thousands deep would end in
 # RecursionError instead of the GffError callers handle. Real NWN files nest well under 20 deep.
 MAX_GFF_DEPTH = 200
@@ -476,7 +486,16 @@ def read_gff(data: bytes) -> GffRoot:
             raise GffError(f"damaged GFF: the {what} table does not fit in the file")
     if s_cnt == 0:
         raise GffError("damaged GFF: no structs")
+    # A list or struct field may point at a struct that something else also points at. The toolset never writes that,
+    # but other tools do (a tester's tileset palette, tcr01palstd.itp, which GFF editors and the game open fine), so it
+    # is read: each place gets its own copy, as if the file held it twice. What is refused is a file that expands
+    # without limit (a "GFF bomb": 40 structs, each listing the next one twice, would be 2^40 structs): the tree may
+    # hold at most REUSE_FACTOR times the file's structs, and never more than REUSE_CAP - unless the file itself has
+    # more, which reuse can't be.
+    budget = max(s_cnt, min(s_cnt * REUSE_FACTOR, REUSE_CAP))
     reads = [0]                                          # structs read so far (a list so the nested functions can add)
+    byte_budget = max(fd_len, min(fd_len * REUSE_FACTOR, REUSE_BYTES_CAP))
+    fd_read = [0]                                        # field data bytes decoded so far
 
     # labels: 16 bytes each, NUL-padded
     labels = [data[l_off + i * 16: l_off + i * 16 + 16].split(b"\0", 1)[0]
@@ -490,6 +509,10 @@ def read_gff(data: bytes) -> GffRoot:
         start = fd_off + offset
         if start + n > len(data):
             raise GffError("field data out of bounds")
+        fd_read[0] += n
+        if fd_read[0] > byte_budget:
+            raise GffError(f"damaged GFF: field data is reused so often the file would expand without limit (over "
+                           f"{byte_budget:,} bytes from {fd_len:,} in the file)")
         return data[start:start + n]
 
     def dec(b: bytes) -> str:
@@ -537,7 +560,9 @@ def read_gff(data: bytes) -> GffRoot:
             if pos + 4 > L:
                 raise GffError("damaged GFF: list out of bounds")
             (n,) = struct.unpack_from("<I", data, pos)
-            if pos + 4 + 4 * n > L or n > s_cnt:
+            # the list must fit in the file; it may have more entries than the file has structs when entries repeat
+            # (the reuse budget in read_struct bounds what that can expand to)
+            if pos + 4 + 4 * n > L:
                 raise GffError("damaged GFF: list longer than the file")
             idxs = struct.unpack_from(f"<{n}I", data, pos + 4)
             val = [read_struct(i) for i in idxs]
@@ -550,16 +575,17 @@ def read_gff(data: bytes) -> GffRoot:
         return label, GffField(ftype, val)
 
     def read_struct(idx, root=False) -> GffStruct:
-        """Struct number idx with all its fields. Refuses cycles, out-of-range indices and struct reuse."""
+        """Struct number idx with all its fields; a struct pointed at from two places is read twice (two copies).
+        Refuses cycles, out-of-range indices and a tree past the budget above."""
         if idx in visiting:
             raise GffError("cyclic struct reference")
         if idx >= s_cnt:
             raise GffError("damaged GFF: struct index out of range")
         _too_deep(len(visiting))                         # visiting = the structs this one is nested in
         reads[0] += 1
-        if reads[0] > s_cnt:
-            # in a real GFF every struct appears once; reusing them multiplies the tree (a 'GFF bomb')
-            raise GffError("damaged GFF: structs are reused (the file would expand without limit)")
+        if reads[0] > budget:
+            raise GffError(f"damaged GFF: structs are reused so often the file would expand without limit (over "
+                           f"{budget:,} structs from {s_cnt:,} in the file)")
         visiting.add(idx)
         sid, dval, cnt = structs_raw[idx]
         s = GffRoot(ftype, fver) if root else GffStruct(sid)

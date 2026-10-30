@@ -51,9 +51,10 @@ def issues():
     check("issues import: Excel's semicolon file; an issue already accepted with the same note is unchanged",
           [(a["key"], a["sig"], a["note"]) for a in p2["accept"]] == [(k1, "script x# missing", "why")] and p2["unchanged"] == 1, p2)
     new = SH.apply_issue_plan(accepted, p2, now="2026-10-05 12:00")
-    check("issues apply: accepted entries carry sig, note, category, label and the time",
+    check("issues apply: accepted entries carry sig, note, category, label, the time and every accepted signature",
           new[k1] == dict(sig="script x# missing", note="why", category="missing_script", label="Goblin",
-                          accepted_at="2026-10-05 12:00") and k2 in new, new)
+                          accepted_at="2026-10-05 12:00",
+                          sigs={"script x# missing": dict(note="why", accepted_at="2026-10-05 12:00")}) and k2 in new, new)
     gone = SH.apply_issue_plan(new, SH.plan_issues(lst, new, f"key,by_design\n{k1},no\n".encode()), now="x")
     check("issues apply: no removes the acceptance", k1 not in gone and k2 in gone, gone)
     ce = [i for i in lst if i["category"] == "compile_error"]

@@ -268,6 +268,9 @@ def build(out, hak):
     add("give_gold_c", identical_src)
     # -- one calls a function from an include it doesn't include (b calls FuncC without #include "inc_c") --
     add("bad_include_caller", 'void main() { FuncC(); }\n')  # FuncC defined in inc_c, not included here
+    # -- a library that declares a prototype and leaves the body to the script that includes it (HCR's hc_i2_*
+    #    libraries do this): not an error (a tester's module, 2026-10-30) --
+    add("inc_proto_lib", 'void FuncC();\nvoid ProtoHelper() { FuncC(); }\n')
     # -- comments containing fake code and fake #include; string literal "// not a comment" --
     add("tricky_comments", (
         '//:: tricky_comments\n'

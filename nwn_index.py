@@ -199,9 +199,10 @@ CREATE TABLE strrefs(file_id INTEGER, path TEXT, strref INTEGER, custom INTEGER,
 CREATE TABLE nodes(node TEXT PRIMARY KEY, type TEXT, name TEXT, label TEXT,
     file_id INTEGER, in_module INTEGER);
 CREATE TABLE edges(src TEXT, dst TEXT, kind TEXT, via TEXT);
-CREATE TABLE tokens(node TEXT, token TEXT);
+CREATE TABLE tokens(node TEXT, token TEXT, ov INTEGER);
 CREATE TABLE issues(severity TEXT, category TEXT, node TEXT, detail TEXT);
 CREATE TABLE conflicts(resource TEXT, sources TEXT);
+CREATE TABLE override_edges(src TEXT, dst TEXT);
 """
 
 INDEXES = """
@@ -301,6 +302,16 @@ for _f in ("SetLocalInt", "SetLocalFloat", "SetLocalString", "SetLocalObject", "
 # Files whose own content may mention other files by name (scanned for resref tokens).
 SCAN_EXTS = n.GFF_EXTENSIONS | {"2da", "mdl", "set", "txi", "nss", "ncs", "ssf", "mtr", "shd",
                                 "txt", "ini", "ltr", "wok", "pwk", "dwk"}
+# Whole-archive files an override folder may hold by accident (a server backup copied in): skipped there. The game
+# loads only loose resources from override; reading a .hak here would make it look loaded (a reviewer, 2026-10-30).
+CONTAINER_EXTS = {"mod", "hak", "erf", "bif", "key", "nwm", "sav"}
+# Where an edge was found matters to the build audit: the clean module is re-indexed without override folders, so where
+# the module (or a hak) has its own copy of a file an override folder also holds, the audit judges the original by the
+# module copy's references alone (nwn_audit._reach_as_clean). The index records, per (src, dst) pair, whether EVERY
+# reference between them came from override copies (table override_edges). Attribution follows each reference to the
+# copy it was read from: edges made while reading a source take that source's kind; a literal or tag queued while
+# reading keeps its copy's kind for post_process (two adversarial tests, 2026-10-30: a text marker in `via` set
+# while reading was wrong for literals resolved later, tag-based edges and resumed runs, and broke readers of `via`).
 # Companion files: if the first is kept, the second must be kept too.
 COMPANIONS = {"mdl": ("wok", "pwk", "dwk", "tga", "dds", "plt", "txi", "mtr"), "tga": ("txi", "mtr"), "dds": ("txi", "mtr"),
               "plt": ("txi",), "mtr": ("tga", "dds", "txi")}   # a model's own-name texture/material is used by it
@@ -571,6 +582,7 @@ class Indexer:
         self.wrappers = {}                   # module function -> kind, when it passes a string parameter on to
                                              # CreateObject / CreateItemOnObject / ExecuteScript / ActionStartConversation
         self.tagbased_prefixes = set()
+        self.prefix_mod = set()              # tag-based prefixes a copy that is NOT an override's set
         self.tagbased_unknown = []           # "script line N" where a tag-based prefix is set from a non-literal
         self.dynamic_creates = []            # (script, line, blueprint ext or "*", call) - see index_nss
         self._cur_tokens = None
@@ -579,6 +591,9 @@ class Indexer:
         # the rank (see add_source) of the copy written so far, so a later, losing copy doesn't overwrite it.
         self.written_copies = {}
         self._cur_rank = 1000
+        self._cur_kind = ""                  # kind of the source being read (edge() attributes edges to it)
+        self.edge_ov = {}                    # "src\tdst" -> 1 while every edge between them came from an override copy
+        self.tag_mod = set()                 # "tag\tnode" carried by a copy that is NOT an override's
 
     def log(self, *a):
         """Print a progress line when verbose."""
@@ -605,8 +620,14 @@ class Indexer:
                 cur["label"] = label
         return nid
 
-    def edge(self, src, dst, kind, via=""):
-        """Record the edge src -> dst of the given kind (see CARRIER_KINDS); via says where it was found."""
+    def edge(self, src, dst, kind, via="", ov=None):
+        """Record the edge src -> dst of the given kind (see CARRIER_KINDS); via says where it was found. ov: True when
+        the reference was read from an override folder's copy (None = the source being read decides); the pair is
+        listed in override_edges only while every edge between the two came from such copies."""
+        if ov is None:
+            ov = self._cur_kind == "override"
+        key = src + "\t" + dst
+        self.edge_ov[key] = min(self.edge_ov.get(key, 1), int(ov))
         # edges repeat the same node ids and kinds many times: interning keeps one copy of each string in memory
         self.edges.append((sys.intern(src), sys.intern(dst), sys.intern(kind), sys.intern(via)))
 
@@ -656,12 +677,22 @@ class Indexer:
         Raises Checkpoint when the time budget runs out (rows read so far are committed first). Files that fail
         to read or parse are recorded (files.status='error' and an issue) rather than stopping the run.
         Only reads the source."""
+        if not os.path.exists(path):
+            # gone between two checkpointed runs (a hak or an override copy moved away): recorded, not a crash. The
+            # files it held so far stay in the index, as "resuming" would have left them
+            self.issue("warning", "source_missing", "module", f"{kind} {path} was not found when the analysis resumed; "
+                       "what it holds is missing from this analysis - put it back and Analyse again")
+            self.log(f"  {kind}: {path}  (not found - skipped)")
+            self._cur_kind = ""
+            return sid if sid is not None else self.db.execute(
+                "INSERT INTO sources(path, kind, priority) VALUES (?,?,?)", (os.path.abspath(path), kind, priority)).lastrowid
         if sid is None:
             cur = self.db.execute("INSERT INTO sources(path, kind, priority) VALUES (?,?,?)",
                                   (os.path.abspath(path), kind, priority))
             sid = cur.lastrowid
         # precedence of this source's copies (lower wins), the game's order (nwnlib.source_rank)
         self._cur_rank = n.source_rank(kind, priority)
+        self._cur_kind = kind
         # (relpath, resref, ext, loader). The loader reads the bytes only when the file's turn comes, so a big hak
         # is never held in memory whole. "Resume at item j" relies on the next run listing the items in the same
         # order (ERF entry order; os.walk order of an unchanged folder - it is not sorted here).
@@ -675,6 +706,8 @@ class Indexer:
                     if kind == "module":
                         self.skipped.append(rel)
                     continue
+                if kind == "override" and ext.lower() in CONTAINER_EXTS:
+                    continue    # the game never loads a .mod/.hak/.bif left in an override folder; neither do we
                 items.append((rel, base.lower(), ext.lower(), (lambda r=rel: n.read_file_inside(path, r))))
             if links and start == 0:
                 # recorded once: a resumed source lists the same links again
@@ -730,11 +763,12 @@ class Indexer:
     STATE_ATTRS = ("strref_rows", "nodes", "edges", "field_rows", "issue_rows", "base_names", "skipped",
                    "resources", "tags", "pending_literals", "file_nodes", "concat_literals",
                    "concat_keys", "tagbased_prefixes", "stats", "tlk_info", "str_consts", "glued_idents", "wrappers", "obj_types",
-                   "written_copies", "tagbased_unknown", "dynamic_creates")
+                   "written_copies", "tagbased_unknown", "dynamic_creates", "edge_ov", "tag_mod", "prefix_mod")
     # JSON has no sets and no tuple dictionary keys: these are written as sorted lists (obj_types as [key, value]
     # pairs) and rebuilt by load_state. Tuples come back as lists, which every reader of these attributes accepts.
-    STATE_SETS = ("base_names", "concat_keys", "tagbased_prefixes", "glued_idents")
-    STATE_FORMAT = "nwn_index checkpoint 2"      # 1 was a pickle (it could run code from the file; never read now)
+    STATE_SETS = ("base_names", "concat_keys", "tagbased_prefixes", "glued_idents", "tag_mod", "prefix_mod")
+    STATE_FORMAT = "nwn_index checkpoint 4"      # 1 was a pickle (it could run code from the file; never read now);
+    #                                               2 had no ov column in tokens, 3 four-part pending literals (1.5.7)
 
     def save_state(self, state_path, progress):
         """Write a checkpoint: flush buffered rows, commit, and write the in-memory state to state_path as JSON.
@@ -872,7 +906,8 @@ class Indexer:
         if self._cur_tokens:
             self._cur_tokens.discard(resref)
             # resource names are <=16 chars: anything longer can never be a name reference
-            self.token_rows.extend((fnode, t) for t in self._cur_tokens if len(t) <= 16)
+            ov = int(self._cur_kind == "override")      # from an override copy: link_names attributes the edge
+            self.token_rows.extend((fnode, t, ov) for t in self._cur_tokens if len(t) <= 16)
             self._cur_tokens = None
             if len(self.token_rows) > 200000:     # write in batches to keep memory bounded on big haks
                 self.flush_fields()
@@ -928,7 +963,7 @@ class Indexer:
         self.field_rows = []
         self.db.executemany("INSERT INTO strrefs VALUES (?,?,?,?,?,?)", self.strref_rows)
         self.strref_rows = []
-        self.db.executemany("INSERT INTO tokens VALUES (?,?)", self.token_rows)
+        self.db.executemany("INSERT INTO tokens VALUES (?,?,?)", self.token_rows)
         self.token_rows = []
 
     def obj_name(self, s: n.GffStruct) -> str:
@@ -973,19 +1008,24 @@ class Indexer:
             vname = var.get("Name", "")
             val = var.get("Value")
             if isinstance(val, str) and val:
-                self.pending_literals.append((owner, 0, "VarTable:" + vname, val))
+                self.pending_literals.append((owner, 0, "VarTable:" + vname, val, self._cur_kind == "override"))
                 # BioWare's tag-based item scripting (x2_inc_switches) runs the script named <this prefix> + item tag
                 if vname == "MODULE_VAR_TAGBASED_SCRIPT_PREFIX":
                     self.tagbased_prefixes.add(val.lower())
+                    if self._cur_kind != "override":
+                        self.prefix_mod.add(val.lower())
                 # short values like "spawn_" or variables named *PREFIX*/*SUFFIX* are probably glued onto names
                 if 2 <= len(val) <= 16 and (val.endswith("_") or val.startswith("_") or
                                             re.search(r"PREFIX|SUFFIX", vname, re.I)):
                     self.concat_literals.append((owner, 0, "VarTable:" + vname, val))
 
     def register_tag(self, node, tag):
-        """Note that node carries tag: a tag_provider edge tag -> node (tags are not unique in NWN)."""
+        """Note that node carries tag: a tag_provider edge tag -> node (tags are not unique in NWN). Remembers whether
+        a copy other than an override folder's carried it (tag_mod), for the tag-based script edges' attribution."""
         if tag:
             self.tags[tag].add(node)
+            if self._cur_kind != "override":
+                self.tag_mod.add(tag + "\t" + node)
             self.edge(self.node(f"tag:{tag}", "tag", tag), node, "tag_provider", "Tag")
 
     def index_blueprint(self, fid, resref, ext, root):
@@ -1115,7 +1155,8 @@ class Indexer:
                 for prm in s.get(plist, []) or []:
                     val = prm.get("Value")
                     if isinstance(val, str) and val:
-                        self.pending_literals.append((nid, 0, f"{plist}:{prm.get('Key', '')}", val))
+                        self.pending_literals.append((nid, 0, f"{plist}:{prm.get('Key', '')}", val,
+                                                      self._cur_kind == "override"))
             if "Text" in s:
                 words += len(self.text(s.get("Text")).split())
         self.db.execute("INSERT INTO conversations VALUES (?,?,?,?,?,?)",
@@ -1233,9 +1274,11 @@ class Indexer:
         for var in root.get("VarTable", []) or []:
             val = var.get("Value")
             if isinstance(val, str) and val:
-                self.pending_literals.append((mod, 0, "VarTable:" + var.get("Name", ""), val))
+                self.pending_literals.append((mod, 0, "VarTable:" + var.get("Name", ""), val, self._cur_kind == "override"))
                 if var.get("Name") == "MODULE_VAR_TAGBASED_SCRIPT_PREFIX":
                     self.tagbased_prefixes.add(val.lower())
+                    if self._cur_kind != "override":
+                        self.prefix_mod.add(val.lower())
                 if 2 <= len(val) <= 16 and (val.endswith("_") or val.startswith("_") or
                                             re.search(r"PREFIX|SUFFIX", var.get("Name", ""), re.I)):
                     self.concat_literals.append(("module", 0, "VarTable:" + var.get("Name", ""), val))
@@ -1326,6 +1369,8 @@ class Indexer:
                 lit = re.fullmatch(r'"([^"]*)"', m.group(1))
                 if lit:
                     self.tagbased_prefixes.add(lit.group(1).lower())
+                    if self._cur_kind != "override":
+                        self.prefix_mod.add(lit.group(1).lower())
                 else:
                     self.tagbased_unknown.append(f"{resref} line {code[:m.start()].count(chr(10)) + 1}")
         # CreateObject / CreateItemOnObject whose blueprint name is neither a "literal" nor glued from pieces (those
@@ -1366,7 +1411,7 @@ class Indexer:
             if func and func.startswith("SetLocalString") and 2 <= len(lit) <= 16 and \
                     (lit.endswith("_") or lit.startswith("_")):
                 self.concat_literals.append((resref, line, func, lit))  # e.g. "spawn_" kept in a variable
-            self.pending_literals.append((sn, line, func or "", lit))
+            self.pending_literals.append((sn, line, func or "", lit, self._cur_kind == "override"))
         self._cur_tokens = toks
 
     def resolve_literals(self):
@@ -1389,9 +1434,12 @@ class Indexer:
         known_dlg = {k[:-4] for k in self.resources if k.endswith(".dlg")}
         known_quests = {r[0] for r in self.db.execute("SELECT tag FROM quests")}
         rows = []
-        for owner, line, func, lit in self.pending_literals:
+        for entry in self.pending_literals:
+            owner, line, func, lit = entry[:4]
+            ov = bool(entry[4]) if len(entry) > 4 else False     # a checkpoint without the kind: the module's
             if not lit or len(lit) > 64:      # long text is a message, never a name
                 continue
+            self._cur_kind = "override" if ov else ""     # edge() attributes this literal's edges to its copy
             via = f"line {line}" if line else func     # line 0: a VarTable / dialogue parameter, named by func
             kind = FUNC_KIND.get(func)
             low = lit.lower()
@@ -1544,11 +1592,14 @@ class Indexer:
         self.db.execute("CREATE TEMP TABLE resnames(name TEXT PRIMARY KEY)")
         self.db.executemany("INSERT OR IGNORE INTO resnames VALUES (?)", ((r,) for r in by_name))
         seen = set()
-        for src, t in self.db.execute("SELECT DISTINCT t.node, t.token FROM tokens t JOIN resnames r ON r.name = t.token"):
+        # ov = 1 only when every copy of the file that holds the word is an override folder's; the module's own copy
+        # naming it makes the use the module's
+        for src, t, ov in self.db.execute("SELECT t.node, t.token, MIN(t.ov) FROM tokens t JOIN resnames r "
+                                          "ON r.name = t.token GROUP BY t.node, t.token"):
             for dst in by_name[t]:
                 if dst != src and (src, dst) not in seen:
                     seen.add((src, dst))
-                    self.edge(src, dst, "name_ref", f"mentions '{t}'")
+                    self.edge(src, dst, "name_ref", f"mentions '{t}'", ov=bool(ov))
         self.db.execute("DROP TABLE resnames")
         self.db.execute("DELETE FROM tokens")
         for res, nd in self.file_nodes.items():
@@ -1566,8 +1617,12 @@ class Indexer:
         concat_literals, creates the indexes and commits. Writes only index.sqlite."""
         nwn_progress.stage("post", "Linking: saving fields")
         self.flush_fields()
+        # every source is read: edges made from here on belong to no source unless they say so (edge(ov=)) - also
+        # after a resumed run, where _cur_kind starts empty
+        self._cur_kind = ""
         nwn_progress.stage("post", "Linking: script strings")
         self.resolve_literals()
+        self._cur_kind = ""
         nwn_progress.stage("post", "Linking: names mentioned inside files")
         self.link_names()
         # a custom talk-table entry with a sound plays that .wav when the line is spoken: a use no GFF field shows
@@ -1594,12 +1649,16 @@ class Indexer:
             if not items:
                 continue
             t = tag.lower()
-            hits = {p + t for p in prefixes if p + t in scripts}
-            hits |= tag_suffix.get(t, set())
-            for sc in hits:
+            # (script, the edge is an override copy's): a prefix only an override's module.ifo or script set makes
+            # the edge the override's too (a third adversarial test, 2026-10-30), as does a tag only such a copy carries
+            hits = {p + t: p != "" and p not in self.prefix_mod for p in prefixes if p + t in scripts}
+            for sc in tag_suffix.get(t, set()):
+                hits.setdefault(sc, False)
+            for sc, prefix_ov in hits.items():
                 for nd in items:
                     self.edge(nd, f"script:{sc}", "tag_based_script",
-                              "Tag = script name" if sc == t else f"Tag-based script ('{sc[:len(sc) - len(t)]}' prefix)")
+                              "Tag = script name" if sc == t else f"Tag-based script ('{sc[:len(sc) - len(t)]}' prefix)",
+                              ov=prefix_ov or (tag + "\t" + nd) not in self.tag_mod)
         # resref-based item scripts: a module whose item-activation script runs ExecuteScript(GetResRef(oItem), ...)
         # runs the script named after the item's resref (blueprint name), whatever its tag. When any module script does
         # that, an item blueprint and a script of the same name are linked like a tag-based script (comments are
@@ -1620,14 +1679,13 @@ class Indexer:
                 self.db.execute("UPDATE scripts SET has_ncs=1 WHERE name=?", (name,))
         # same resource in several sources (module vs hak vs override); listed in source-id (= load) order,
         # e.g. "module | hak:cep2_top" - which copy wins is decided by readers (see the module docstring)
+        names = {}
+        for sid_, kind_, path_ in self.db.execute("SELECT id, kind, path FROM sources"):
+            names[sid_] = source_label(kind_, path_)
         for res, lst in self.resources.items():
             sids = sorted({s for s, _ in lst})
             if len(sids) > 1:
-                srcs = [self.db.execute("SELECT kind||':'||path FROM sources WHERE id=?", (s,)).fetchone()[0]
-                        for s in sids]
-                srcs = [("module" if x.startswith("module:") else x.split(":", 1)[0] + ":" +
-                         re.sub(r"\.hak$", "", os.path.basename(x.split(":", 1)[1].rstrip("/\\")), flags=re.I)) for x in srcs]
-                self.db.execute("INSERT INTO conflicts VALUES (?,?)", (res, " | ".join(srcs)))
+                self.db.execute("INSERT INTO conflicts VALUES (?,?)", (res, " | ".join(names[s] for s in sids)))
         # existence of every node: a node first created as a bare reference exists if some loaded source has it
         # (variables always count as existing: they have no file)
         for nid, nd in self.nodes.items():
@@ -1655,6 +1713,8 @@ class Indexer:
                             [(k, v["type"], v["name"], v["label"], v["file_id"], v["in_module"])
                              for k, v in self.nodes.items()])
         self.db.executemany("INSERT INTO edges VALUES (?,?,?,?)", self.edges)
+        self.db.executemany("INSERT INTO override_edges VALUES (?,?)",
+                            [tuple(k.split("\t", 1)) for k, v in self.edge_ov.items() if v])
         self.db.execute("INSERT OR REPLACE INTO meta VALUES ('skipped_files', ?)", (json.dumps(self.skipped[:500]),))
         # read by nwn_analysis's safe-to-delete stage (see index_nss for what they mean)
         self.db.execute("INSERT OR REPLACE INTO meta VALUES ('tagbased_prefix_unknown', ?)",
@@ -2057,8 +2117,69 @@ def default_overrides(nwn_user):
     return [d] if os.path.isdir(d) and any(True for _ in os.scandir(d)) else []
 
 
+EXTRA_OVERRIDES = "extra_overrides.json"   # <analysis>/: the extra override folders this analysis reads (your work)
+
+
+def load_extra_overrides(analysis):
+    """The extra override folders saved for an analysis ([] when none, or the file can't be read). Never raises."""
+    try:
+        with open(os.path.join(analysis, EXTRA_OVERRIDES), encoding="utf-8") as fh:
+            v = json.load(fh)
+        return [str(x) for x in v if isinstance(x, str) and x.strip()] if isinstance(v, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def save_extra_overrides(analysis, folders):
+    """Save the extra override folders of an analysis (through a .tmp file); an empty list removes the file.
+    Writes only <analysis>/extra_overrides.json. Returns the list saved."""
+    folders = [str(f).strip() for f in folders if str(f).strip()]
+    p = os.path.join(analysis, EXTRA_OVERRIDES)
+    if not folders:
+        if os.path.exists(p):
+            os.remove(p)
+        return []
+    os.makedirs(analysis, exist_ok=True)
+    tmp = f"{p}.{os.getpid()}.{time.monotonic_ns()}.tmp"    # a name of its own: two saves at once never share one
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(folders, fh, indent=1, ensure_ascii=False)
+        os.replace(tmp, p)
+    finally:
+        if os.path.exists(tmp):                           # a failed write leaves nothing behind
+            os.remove(tmp)
+    return folders
+
+
+def source_label(kind, path):
+    """How a source is named where one file is in several places: "module", "hak:<name>" or "override:<folder>".
+    An override folder is named by its folder, with the folder above it when it is just called "override" (a copy
+    of a server's, C:\\copies\\live-server\\override, is "override:live-server/override", and the user folder's own is
+    "override:Neverwinter Nights/override"), so two override folders can be told apart."""
+    if kind == "module":
+        return "module"
+    p_ = path.rstrip("/\\")
+    base = re.sub(r"\.hak$", "", os.path.basename(p_), flags=re.I)
+    if kind == "override" and base.lower() == "override":
+        base = os.path.basename(os.path.dirname(p_)) + "/" + base
+    return f"{kind}:{base}"
+
+
+def extra_override_folders(extra):
+    """(found, missing) of the extra override folders asked for (a copy of a server's override folder ...): found as
+    absolute paths, without repeats; missing as given (no such folder)."""
+    found, missing = [], []
+    for e in extra or ():
+        a_ = os.path.abspath(e)
+        if not os.path.isdir(a_) or n._is_link(a_):      # a link is never followed (it could point anywhere)
+            missing.append(e)
+        elif os.path.normcase(a_) not in [os.path.normcase(x) for x in found]:
+            found.append(a_)
+    return found, missing
+
+
 def run_index(module_path, haks=(), overrides=None, tlk=None, out=None, write_json=True, verbose=True,
-              nwn_root=None, nwn_user=None, time_budget=None, module_format=None):
+              nwn_root=None, nwn_user=None, time_budget=None, module_format=None, extra_overrides=()):
     """
     Index a module (+haks/overrides) into <out>/index.sqlite.
     time_budget (seconds): stop cleanly when it is spent and write <out>/index.state; calling again with the
@@ -2068,7 +2189,11 @@ def run_index(module_path, haks=(), overrides=None, tlk=None, out=None, write_js
     the NWN hak folders). overrides: override folders; None (the default) = <nwn_user>/override if it has files, [] =
     none (the clean-build audit indexes that way: players don't have the builder's override folder). tlk: custom
     .tlk path. out: analysis folder (default ./nwn_analysis/<module>). nwn_root / nwn_user: game install and user
-    folders (base-game names, dialog.tlk, hak and tlk folders). module_format: recorded in meta for a module that
+    folders (base-game names, dialog.tlk, hak and tlk folders). extra_overrides: more override folders, read before
+    the user folder's own - typically a copy of the server's override folder, whose loose 2das and scripts the
+    server's scripts read (a PW's loot tables...). Like any override they count for what uses what, never for builds
+    (players don't have them); recorded in meta extra_overrides, and a folder that isn't there is an issue
+    (override_folder_missing). module_format: recorded in meta for a module that
     came from a nasher project ("nasher json" - the audit passes the original's), so scripts kept as source only are
     judged as in the original. Order of work: module.ifo is read first for the
     custom tlk name, then the module, then the haks it lists, then the overrides, then post_process.
@@ -2076,6 +2201,11 @@ def run_index(module_path, haks=(), overrides=None, tlk=None, out=None, write_js
     """
     t0 = time.time()
     overrides = default_overrides(nwn_user) if overrides is None else list(overrides)
+    # extra folders first: the game reads one override folder, so of two copies of a file the server's is the one the
+    # server's scripts see (nwnlib.source_rank: lower priority number wins among overrides)
+    extra_found, extra_missing = extra_override_folders(extra_overrides)
+    overrides = extra_found + [o for o in overrides
+                               if os.path.normcase(os.path.abspath(o)) not in [os.path.normcase(x) for x in extra_found]]
     mod_name = os.path.splitext(os.path.basename(os.path.normpath(module_path)))[0]
     out = out or os.path.join(os.getcwd(), "nwn_analysis", mod_name)
     state_path = os.path.join(out, "index.state")
@@ -2137,6 +2267,11 @@ def run_index(module_path, haks=(), overrides=None, tlk=None, out=None, write_js
     ix.db.execute("INSERT INTO meta VALUES ('module_path', ?)", (os.path.abspath(module_path),))
     ix.db.execute("INSERT INTO meta VALUES ('indexed_at', ?)", (time.strftime("%Y-%m-%d %H:%M:%S"),))
     ix.db.execute("INSERT INTO meta VALUES ('tlk_custom_name', ?)", (custom_name,))
+    ix.db.execute("INSERT INTO meta VALUES ('extra_overrides', ?)", (json.dumps(extra_found),))
+    for e in extra_missing:
+        ix.issue("warning", "override_folder_missing", "module",
+                 f"the extra override folder '{e}' was not found, so it was not read - copy the server's override "
+                 "folder to this computer again, or remove it from the list (Overview > Server override folders)")
     if module_format and not conv:
         # the audit's index of a clean build made from a nasher project: judged by the same rules as the original
         ix.db.execute("INSERT INTO meta VALUES ('module_format', ?)", (module_format,))

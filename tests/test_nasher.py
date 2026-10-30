@@ -255,6 +255,42 @@ def sources_only(tmp):
           nwn_nasher.sources_from_text('[package]\nname="x"\n[package.sources]\ninclude = ["a/**/*", "b/*.nss"]\n'
                                        'exclude = [\n  "a/test/*"\n]\n') == (["a/**/*", "b/*.nss"], ["a/test/*"]) and
           nwn_nasher.sources(tmp)["include"] == ["**"])
+    # nasher.cfg as a module built on a script package writes it (a tester's PRC8 module, 2026-10-30): include given
+    # twice, one filter line per include script the package's hak provides
+    cfg2 = ('[package]\nname = "x"\n[target]\nname = "m"\nfile = "m.mod"\n\t[target.sources]\n'
+            '\t\tinclude = "src/module/**/*"\n\t\tinclude = "src/inc/**/*"\n\t\tfilter = "pkg_util.nss"\n'
+            '\t\tfilter = "pkg_*.nss"\n')
+    check("cfg: a key given twice keeps both values; filter lines are read (before 1.5.7 only the last of each)",
+          nwn_nasher._sources(cfg2) == (["src/module/**/*", "src/inc/**/*"], [], ["pkg_util.nss", "pkg_*.nss"]) and
+          nwn_nasher.sources_from_text(cfg2) == (["src/module/**/*", "src/inc/**/*"], []))
+    p2 = os.path.join(tmp, "proj2")
+    shutil.copytree(proj, p2)
+    os.makedirs(os.path.join(p2, "src", "inc"))
+    for f in ("pkg_util.nss", "pkg_spells.nss", "my_inc.nss"):
+        open(os.path.join(p2, "src", "inc", f), "w").write("int X(){ return 1; }\n")
+    with open(os.path.join(p2, "nasher.cfg"), "w") as fh:
+        fh.write(cfg2.replace("src/module/", "src/"))
+    names = {r for r, *_x in nwn_nasher.list_resources(p2)[0]}
+    check("sources: filter keeps matching file names out of the module (by name, in any folder); both includes count",
+          "my_inc" in names and "pkg_util" not in names and "pkg_spells" not in names and len(names) > 3, sorted(names)[:8])
+    with open(os.path.join(p2, "nasher.cfg"), "w") as fh:
+        fh.write(cfg2)                                   # src/module/** matches nothing: the folder is src/<ext>
+    q2 = nwn_quickscan.scan(p2)
+    check("quick scan: an include that matches no file is a warning naming it",
+          nwn_nasher.unmatched_includes(p2) == ["src/module/**/*"] and
+          any('"src/module/**/*", which matches no file' in w_["text"] and w_["level"] == "warning" for w_ in q2["warnings"]),
+          q2["warnings"])
+    # a glob the regex engine refuses ("[]", "[z-a]") matches nothing instead of crashing (an adversarial test)
+    with open(os.path.join(p2, "nasher.cfg"), "w") as fh:
+        fh.write(cfg2.replace("src/module/**/*", "src/[z-a]/*") + '  include = "[]"\n')
+    try:
+        um = nwn_nasher.unmatched_includes(p2)
+        ok_ = um == ["src/[z-a]/*", "[]"] and nwn_quickscan.scan(p2)["module"]["kind"] == "nasher project"
+    except Exception as ex:  # noqa
+        ok_ = str(ex)
+    check("an include glob that isn't a valid pattern matches nothing (quick scan still runs)", ok_ is True, ok_)
+    with open(os.path.join(p2, "nasher.cfg"), "w") as fh:
+        fh.write(cfg2)
     outside = [0]
     items, _sk = nwn_nasher.list_resources(proj, outside)
     rels = [r for *_x, r, _j in items]

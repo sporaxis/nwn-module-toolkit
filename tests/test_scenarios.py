@@ -90,6 +90,10 @@ def marta(tmp, root):
     cats = {i["category"] for i in rep["issues"]}
     check("marta: include cycle detected", "include_cycle" in cats, cats)
     check("marta: missing #include for called library function", "missing_include" in cats, cats)
+    mi = {i["node"]: (i["severity"], i["detail"]) for i in rep["issues"] if i["category"] == "missing_include"}
+    check("marta: a library that declares the prototype (inc_proto_lib) is a note saying so; bad_include_caller is not",
+          mi.get("script:inc_proto_lib", ("", ""))[0] == "info" and "declares it" in mi["script:inc_proto_lib"][1]
+          and "declares it" not in mi.get("script:bad_include_caller", ("", ""))[1], mi)
     check("marta: missing journal quest detected", "missing_quest" in cats, cats)
     check("marta: resource conflict module vs hak detected", "resource_conflict" in cats, cats)
     cat = json.load(open(os.path.join(out, "catalog.json"), encoding="utf-8"))

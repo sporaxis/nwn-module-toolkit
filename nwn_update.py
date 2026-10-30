@@ -111,6 +111,13 @@ REANALYSE = [
          what="The classes' feat tables (cls_feat_*.2da): empty rows, feats that don't exist, feats with no name"),
     dict(key="palette_notes", since="1.5.6",
          what="Blueprints in no palette category listed as notes on the Issues page"),
+    # include_notes 1: a missing #include is a note naming the haks module.ifo lists but the analysis didn't find
+    dict(key="include_notes", since="1.5.7",
+         what="Missing includes that may be in a hak the module lists but wasn't found: notes naming the hak, not errors"),
+    # override_edges: which references came only from override folders' copies; without it the build audit can report
+    # a false loss where a server (or the user's own) override holds a copy of a module file
+    dict(key="override_edges", since="1.5.7",
+         what="Server override folders (Overview) and an audit that tells the override's references from the module's"),
 ]
 
 # --- (a) bringing work across -------------------------------------------------------------------------------

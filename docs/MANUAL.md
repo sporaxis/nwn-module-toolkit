@@ -196,8 +196,11 @@ Type or paste the path, or use **Browse…**. You can point it at:
 **nasher projects.** The toolkit converts the JSON files into an ordinary module folder inside the analysis folder
 (`module_from_json/`) and analyses that copy: each `<name>.<ext>.json` becomes the binary file, `.nss`, `.2da` and
 other game files are copied. Only the files `nasher.cfg` packs are read (its `[Sources]` / `[package.sources]`
-include and exclude patterns, e.g. `src/**/*.{nss,json}`), so base-game script copies, server files and tools kept in
-the same repository are not mistaken for module content; the quick scan says how many files it left out. Your project
+include and exclude patterns, e.g. `src/**/*.{nss,json}`, every `include =` line counting, and `filter =` lines,
+which keep files of that name out of the module as nasher does - a module built on a script package filters the
+package's include scripts, which come from its hak), so base-game script copies, server files and tools kept in the
+same repository are not mistaken for module content; the quick scan says how many files it left out, and warns when an
+include pattern matches no file at all (a mistyped folder leaves that part out). Your project
 is only read. The Overview names the project; **Analyse again** converts it afresh, so changes you made since show up.
 nasher keeps scripts as source and compiles them when it packs, so a missing `.ncs` is expected: one note says so
 instead of a warning per script. **Build & audit** gives a normal module folder and `.mod` and compiles every script
@@ -412,6 +415,45 @@ enabled rather than guess:
   value is stored as it is**, in `server_config.json` in the analysis folder - check that file before you share it.
   The chip's ✕ removes a loaded file again. No re-analysis is needed: this is worked out when you open the Overview.
 
+**Server override folders** (the next card) read a copy of the server's `override` folder as part of the analysis. A
+persistent world often keeps loose files there that are in neither the module nor its haks - 2da tables such as loot
+and random-gear lists, patched scripts - and the server's scripts read them. Without them, the items a loot table lists
+look unused. Step by step:
+1. **Copy the server's override folder to your computer.** It is the `override` folder inside the server's NWN user
+   folder - the folder that also holds the server's `modules` and `hak` folders (on a Linux server often
+   `~/.local/share/Neverwinter Nights/override`, or a folder mounted into the docker container; your server settings
+   or host can tell you). Copy it with WinSCP or FileZilla (drag the whole `override` folder to your PC), with
+   `scp -r user@server:"<path>/override" "C:\NWN server copies\live"`, or take it from a server backup. Put it in a
+   folder of its own, for example `C:\NWN server copies\live\override`. **Not** into your own
+   `Documents\Neverwinter Nights\override`: your game loads that folder.
+2. **Add it**: on the Overview, paste the path of the copy into **Server override folders** and press **Add**. The
+   table shows how many files and 2da tables it holds, and *press Analyse again to read it*.
+3. **Press Analyse again.** The status changes to *read by this analysis*. Items the tables there list now count as in
+   use (Safe to delete, Blueprints, Orphans...), and scripts' 2da reads find their tables.
+4. **Keep it current**: copy the folder again whenever the server's override changes, then Analyse again.
+
+What to know:
+- The folder is only read, never changed. **remove** takes it off the list (the folder itself is not touched); the
+  list is kept with the analysis (`extra_overrides.json`, your own work - Clear keeps it).
+- It counts for *what uses what* only. **Build & audit never takes anything from it**: players don't have the server's
+  override, so the clean module and its haks are built from the module and haks alone. The audit says how many
+  resources were in use only through override files ("not counted: ... in use only through override files"), so they
+  are not reported as lost; one that is really missing from the clean module still fails the audit.
+- Where a file is in several places, the copy is named after the folder above it, e.g. `override:live/override`, so it
+  can't be mistaken for your own override (`override:Neverwinter Nights/override`). The module and its haks win over
+  any override, as in the game; between two override folders, the server's copy wins. Where the module (or a hak)
+  and the server's copy both have a table, the names in *both* copies count as in use - keeping more is the safe
+  side; the audit still tells the two apart.
+- Every file in the copy counts, subfolders included (an `override/old/` the server no longer loads keeps its items
+  "in use" too - leave such folders out of the copy if that matters). Archives left in it (`.mod`, `.hak`, `.bif`...)
+  are skipped: the game doesn't load them from there either.
+- Refused, with the reason: a whole drive, anything in the toolkit's workspace, the module's own folder, the game
+  install or NWN user folder. Paste the path of the override copy itself.
+- A folder on the list that has gone (moved or deleted) gives one warning, *override_folder_missing*, at the next
+  analysis; the rest are still read, and it never stops you adding or removing another.
+- From the command line: `python nwn_analyse.py "<module>" --override "C:\NWN server copies\live\override"` (repeat
+  `--override` for several). It is remembered for the analysis, like the Overview's list.
+
 ### 5.2 Issues
 Errors and warnings are listed; tick **show info notes** for the informational ones (base-game resources and things to
 know). These findings are info notes, not errors or warnings, so the real problems stand out:
@@ -460,8 +502,16 @@ Some issues are by design. Tick **By design** on an issue and add a note (for ex
 time"). It is hidden (tick *show accepted* to see it again), left out of the counts on the menu and the Overview, and
 stays accepted when you re-analyse. If what the issue says changes, it comes back with *changed since you accepted it*
 - except the list of places after "used by": accepting a missing script covers every object that names it, also
-ones you add later.
+ones you add later. One script or object can have several issues of the same kind (a script missing two includes has
+two): each is accepted on its own, and accepting one never undoes another. *Changed since you accepted it* appears only
+when something you accepted there no longer matches any issue; a new issue next to ones you accepted is simply open.
 Accepted issues are kept in `accepted_issues.json` in the analysis folder, as your work.
+
+**Missing includes.** `#include "x" not found in module` means no source the game loads has `x.nss` - not the module,
+its haks or the base game - so the script can't compile. Script packages usually keep their include scripts in a hak of
+their own: when the module lists haks the analysis couldn't find, these are info notes naming those haks instead of
+errors, since the includes may be in them. Put the haks in your hak folder (or set the folder in Settings) and
+**Analyse again**.
 
 Many at once: narrow the list with the search and filters, then **Accept all shown (N)…** (one note for all of them);
 with *show accepted* ticked, **Un-accept all shown (N)…** makes them count again. For a long review, **Export CSV**

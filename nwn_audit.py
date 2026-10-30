@@ -59,7 +59,7 @@ import sqlite3
 import re
 import sys
 import time
-from collections import defaultdict  # noqa
+from collections import defaultdict, deque  # noqa
 
 import nwnlib as n
 import nwn_analysis
@@ -78,14 +78,47 @@ def _module_files(db):
         "SELECT f.relpath, f.sha256 FROM files f JOIN sources s ON s.id=f.source_id WHERE s.kind='module'")}
 
 
-def _override_only_nodes(db):
-    """Graph nodes whose every file in this index comes from the user override folder (none from the module, a hak
-    or the base game). Read-only."""
+def _override_only_nodes(db, og):
+    """Graph nodes the clean module's re-index (which never reads override folders) cannot have: nodes whose every file
+    in this index comes from an override folder (the builder's own or a copy of a server's), and nodes that are no
+    file at all - a tag, a variable, an object placed in an area - that only override copies refer to (every edge
+    into them is in og.override_pairs; a third adversarial test, 2026-10-30: an NPC the server's copy of an area adds
+    is the commonest override shape). Read-only."""
     kinds = {}
     for node, kind in db.execute("SELECT f.node, s.kind FROM files f JOIN sources s ON s.id=f.source_id "
                                  "WHERE f.node IS NOT NULL"):
         kinds.setdefault(node, set()).add(kind)
-    return {nd for nd, ks in kinds.items() if ks == {"override"}}
+    only = {nd for nd, ks in kinds.items() if ks == {"override"}}
+    if og.override_pairs:
+        for nd in og.nodes:
+            if nd not in kinds and nd != "module":
+                into = og.rev.get(nd, [])
+                if into and all((src, nd) in og.override_pairs for src, _k, _v in into):
+                    only.add(nd)
+    return only
+
+
+def _reach_as_clean(og, roots, avoid):
+    """The original's reach from `roots` as the clean module's re-index (which never reads override folders) can see
+    it: nodes in `avoid` (override-only, _override_only_nodes) are reached but not walked through, and a reference
+    that only override copies made (og.override_pairs: the index attributes every reference to the copy it was read
+    from) is not followed from any node - the index joins every copy of a file into one node, so an item the server's
+    loose copy of a table lists, but the module's copy doesn't, is in use only through the override (a reviewer's
+    probe, 2026-10-30). Judged from the original alone: an earlier version filtered by the CLEAN graph's edges, which
+    let an edit that drops a reference from such a file pass as "in use only through override", and a later one
+    filtered file nodes only, failing honest builds on tags, variables and placed objects (adversarial tests,
+    2026-10-30). Read-only."""
+    seen = set(roots)
+    q = deque(roots)
+    pairs = og.override_pairs
+    while q:
+        cur = q.popleft()
+        if (cur.startswith("file:") and cur.endswith(".itp")) or cur in avoid:
+            continue        # palettes list every blueprint - not a use; override-only: reached, not passed
+        for dst, _kind, _via in og.fwd.get(cur, []):
+            if dst not in seen and (cur, dst) not in pairs:
+                seen.add(dst); q.append(dst)
+    return seen
 
 
 def _player_2da_cells(db):
@@ -399,12 +432,15 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
         if i["category"] == "resource_conflict" and i["node"] in o_places:
             return not set(s_[2].split(" | ")) <= o_places[i["node"]]
         return s_ not in o_sig
-    new_issues = [i for i in c_rep["issues"] if i["severity"] in ("error", "warning") and is_new(i)]
+    # "was": a severity the analysis lowered only because something wasn't loaded (nwn_analysis.include_notes - a hak the
+    # module lists not found); the audit's analysis of the clean module has the same gap, so it judges the original one
+    sev = lambda i: i.get("was") or i["severity"]  # noqa: E731
+    new_issues = [i for i in c_rep["issues"] if sev(i) in ("error", "warning") and is_new(i)]
     # "not compiled" on a script you edited is reported by edits_compiled below (a WARN), not as a broken reference
     # (any severity: a new script nothing uses yet has its "not compiled" lowered to info, but still needs compiling)
     uncompiled_edits = [i for i in c_rep["issues"] if i["category"] == "not_compiled" and i["node"] in edited_scripts]
     new_issues = [i for i in new_issues if i not in uncompiled_edits]
-    new_errors = [i for i in new_issues if i["severity"] == "error"]
+    new_errors = [i for i in new_issues if sev(i) == "error"]
     # an edited script whose .ncs was carried over from the original: the game runs the OLD compiled code
     compiled_now = {c.lower() for c in changes.get("compiled", [])}
     stale_ncs = sorted(sn[7:] for sn in edited_scripts
@@ -438,10 +474,16 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
            f"{_counts_sentence(o_rep['summary']['issues'])})"],
           "Full validation re-run on the clean module and compared with the original.")
 
-    # 6 areas / placed objects - proves every kept area keeps its listing in module.ifo and its object counts per type
-    def area_counts(rep):
-        return {a["node"]: (a["in_module_list"], a["counts"]) for a in rep["areas"]}
-    oa, ca = area_counts(o_rep), area_counts(c_rep)
+    # 6 areas / placed objects - proves every kept area keeps its listing in module.ifo and its object counts per type.
+    # Counted from the copies players get: an override folder's copy of an area (the user's own or a server's, read
+    # by the original's analysis only) is left out, as _player_objects does - the clean module never has it
+    def area_counts(rep, db_):
+        counts = defaultdict(lambda: defaultdict(int))
+        for _nid, area, cls in db_.execute("SELECT o.node, o.area, o.class FROM objects o JOIN files f ON f.id=o.file_id "
+                                           "JOIN sources s ON s.id=f.source_id WHERE o.is_blueprint=0 AND s.kind != 'override'"):
+            counts[f"area:{(area or '').lower()}"][cls] += 1
+        return {a["node"]: (a["in_module_list"], dict(counts.get(a["node"], {}))) for a in rep["areas"]}
+    oa, ca = area_counts(o_rep, odb), area_counts(c_rep, cdb)
     ev = []
     for a, v in oa.items():
         if a in removed_nodes:
@@ -456,8 +498,11 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
 
     # 6b placements: every kept placed object is exactly where it was (position, and its whole record apart from logged rewrites)
     def placements(db_):
+        """Placed objects of the copies players get (an override folder's copy of an area is left out: the original's
+        analysis read it, the clean module's never does - a third adversarial test, 2026-10-30)."""
         return {r[0]: (r[1], r[2], r[3], r[4], r[5]) for r in db_.execute(
-            "SELECT node, area, template, tag, x, y FROM objects WHERE is_blueprint=0")}
+            "SELECT o.node, o.area, o.template, o.tag, o.x, o.y FROM objects o JOIN files f ON f.id=o.file_id "
+            "JOIN sources s ON s.id=f.source_id WHERE o.is_blueprint=0 AND s.kind != 'override'")}
     op, cp = placements(odb), placements(cdb)
     olabels = o_rep.get("labels") or {}
     lbl = lambda nid: olabels.get(nid, nid)  # noqa: E731
@@ -504,24 +549,41 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
     og = nwn_analysis.Graph(odb)
     cg = nwn_analysis.Graph(cdb)
 
+    def roots_of(g, avoid=()):
+        """The module and its own files (palettes excluded: they list every blueprint, which is not a real use),
+        without the nodes in `avoid`."""
+        return {"module"} | {k for k, v in g.nodes.items() if v["in_module"] and k not in avoid and
+                             (v["type"] == "2da" or (k.startswith("file:") and not k.endswith(".itp")))}
+
     def live(g):
-        """Module nodes reachable from the module and its own files (palettes excluded: they list every blueprint,
-        which is not a real use)."""
-        roots = {"module"} | {k for k, v in g.nodes.items() if v["in_module"] and
-                              (v["type"] == "2da" or (k.startswith("file:") and not k.endswith(".itp")))}
-        return {k for k in g.reachable(roots) if g.nodes.get(k, {}).get("in_module")}
-    o_live, c_live = live(og), live(cg)
-    # The original's analysis read the builder's override folder; the clean module is re-indexed without it (players
-    # don't have it). A resource that only the override provided is "in use" in the original and absent from the clean
-    # index, but the build did not remove it - players never had it. Those are reported as a note, not as lost.
-    override_only = _override_only_nodes(odb)
+        """Module nodes reachable from roots_of(g)."""
+        return {k for k in g.reachable(roots_of(g)) if g.nodes.get(k, {}).get("in_module")}
+    # The original's analysis read the override folders (the builder's own, and copies of a server's); the clean
+    # module is re-indexed without them (players don't have them). A resource that only an override provided is "in
+    # use" in the original and absent from the clean index, but the build did not remove it - players never had it:
+    # a note, not lost. So is what was in use only THROUGH such a resource (an item a loot table in a server's
+    # override lists): the original's reach is worked out as the clean module's re-index sees it (_reach_as_clean):
+    # not through override-only resources, and never along a reference only an override's copy made.
+    override_only = _override_only_nodes(odb, og)
+    o_live = {k for k in _reach_as_clean(og, roots_of(og, override_only), override_only)
+              if og.nodes.get(k, {}).get("in_module")}
+    c_live = live(cg)
+    # Only those still in the clean module are kept and become a note; one that is no longer in it at all (and that
+    # the plan didn't remove) is still a loss.
+    only_through = [k for k in live(og) - o_live - set(override_only)
+                    if not k.startswith(("tag:", "var:")) and k not in c_live and k not in removed_nodes]
+    through_override = sorted(k for k in only_through if cg.nodes.get(k, {}).get("in_module"))
+    gone_too = {k for k in only_through if not cg.nodes.get(k, {}).get("in_module")}
     # tag: and var: nodes are names used at run time (object tags, local variables), not files: not counted here
-    lost_all = sorted(k for k in o_live - c_live if k not in removed_nodes and not k.startswith(("tag:", "var:")))
+    lost_all = sorted(k for k in (o_live | gone_too) - c_live if k not in removed_nodes and not k.startswith(("tag:", "var:")))
     lost = [k for k in lost_all if k not in override_only]
     from_override = [k for k in lost_all if k in override_only]
-    note = ([f"not counted: {len(from_override)} resource(s) the original found only in your override folder "
+    note = ([f"not counted: {len(from_override)} resource(s) the original found only in an override folder "
              f"(players don't get them, with or without this build), e.g. "
              + ", ".join(og.label(k) for k in from_override[:5])] if from_override else [])
+    note += ([f"not counted: {len(through_override)} resource(s) in use only through override files (for example "
+              f"items a loot table there lists; still in the clean module, the build kept them), e.g. "
+              + ", ".join(og.label(k) for k in through_override[:5])] if through_override else [])
     check("in_use", "Everything that was in use is still present and reachable", "FAIL" if lost else "PASS",
           ([f"no longer present/reachable: {og.label(k)}" for k in lost] or [f"{len(c_live)} in-use resources verified"])
           + note,

@@ -83,3 +83,26 @@ def stand_in_ncs(name=""):
             b"\x1b\x00" + struct.pack(">i", -4) +                         # MOVSP -4 (drop it again)
             b"\x20\x00")                                                  # RET
     return b"NCS V1.0B" + struct.pack(">I", 13 + len(body)) + body
+
+
+def raw_gff(structs, fields, labels, lists=b"", ftype=b"ITP ", fdata=b""):
+    """A GFF built byte by byte, for shapes write_gff never makes (a struct two places point at, a GFF bomb).
+    structs: [(struct id, [field index, ...])]; fields: [(type, label index, data slot)]; labels: names; lists: the
+    list-indices block (per list: uint32 count, then struct indices); fdata: the field data block (strings and other
+    values a slot points into). Struct 0 is the root. Layout as nwnlib.read_gff reads it (BioWare GFF V3.2)."""
+    import struct as _s
+    fi = st_ = b""
+    for sid, fl in structs:
+        if len(fl) == 1:
+            st_ += _s.pack("<3I", sid, fl[0], 1)          # one field: the slot holds its index
+        else:
+            st_ += _s.pack("<3I", sid, len(fi), len(fl))   # several: a byte offset into the field indices
+            fi += _s.pack(f"<{len(fl)}I", *fl)
+    fd = b"".join(_s.pack("<3I", *f) for f in fields)
+    lb = b"".join(x.encode().ljust(16, b"\0") for x in labels)
+    off, offs, parts = 56, [], [st_, fd, lb, fdata, fi, lists]
+    for p_ in parts:
+        offs.append(off)
+        off += len(p_)
+    return (ftype + b"V3.2" + _s.pack("<12I", offs[0], len(structs), offs[1], len(fields), offs[2], len(labels),
+                                      offs[3], len(fdata), offs[4], len(fi), offs[5], len(lists)) + b"".join(parts))

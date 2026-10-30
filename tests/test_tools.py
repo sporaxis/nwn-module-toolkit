@@ -351,7 +351,8 @@ def test_accept(tmp, mod, out, rep):
     check("accept: the facts API reports it as accepted (so it isn't raised again)", got.get("accepted_by_design") is True, got)
     with open(os.path.join(out, "accepted_issues.json"), encoding="utf-8") as fh:
         stored = json.load(fh)
-    stored[key]["sig"] = "something else"
+    stored[key]["sig"] = "something else"           # what it said when accepted no longer matches (both forms)
+    stored[key]["sigs"] = {"something else": {"note": "DM tool sets it"}}
     with open(os.path.join(out, "accepted_issues.json"), "w", encoding="utf-8") as fh:
         json.dump(stored, fh)
     got = next(x for x in f.issues("variable_case_twin")["issues"] if x["label"] == i["label"])

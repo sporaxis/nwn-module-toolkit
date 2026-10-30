@@ -213,7 +213,8 @@ def tester_feedback(tmp):
         __import__("re").sub(r"\d+", "#", d1), d1), d1)
     page = open(os.path.join(h.ROOT, "dashboard.html"), encoding="utf-8").read()
     check("page: the same rule (sigCore) and an 'All N places' list under an issue's detail",
-          'const sigCore = s => String(s || "").split("; used by ")[0];' in page and "All ${i.places.length} places" in page)
+          'const sigCore = s => String(s || "").split("; used by ")[0].slice(0, 4000);' in page and
+          'const issueSig = i => String(i.detail || "").split("; used by ")[0]' in page and "All ${i.places.length} places" in page)
     st_ = by("variable_type_mismatch", "STORE")
     check("type mismatch says where the other type is set (script line)",
           st_ and "sh_store:4 (object)" in st_[0]["detail"] and "reused" in st_[0]["detail"], st_)

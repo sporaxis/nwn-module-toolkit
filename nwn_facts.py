@@ -566,9 +566,10 @@ class Facts:
         for i in self.report().get("issues", []):
             a = acc.get(f"{i.get('category')}|{i.get('node')}|{i.get('label')}")
             # the signature is the detail text with every number replaced by #, so a changed count ("3 scripts" ->
-            # "4 scripts") still matches but different wording does not
-            if a and nwn_sheets.sig_matches(a.get("sig"), i.get("detail")):
-                i = dict(i, accepted_by_design=True, accepted_note=a.get("note", ""))
+            # "4 scripts") still matches but different wording does not; one key can hold several accepted issues
+            note = nwn_sheets.accepted_match(a, i.get("detail"))
+            if note is not None:
+                i = dict(i, accepted_by_design=True, accepted_note=note)
             if category and i.get("category") != category:
                 continue
             if severity and i.get("severity") != severity:
