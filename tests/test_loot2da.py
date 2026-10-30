@@ -85,6 +85,124 @@ def main():
         rep3 = h.analyse(m3, os.path.join(tmp, "an_none"))
         check("loot: without the tables the toolkit can't know - those items are not counted as in use",
               status(rep3, "bp:it_sword_a.uti") != "in use")
+        # the loot table kept in the campaign database (a tester's world, 2026-10-30): once its files are loaded on the
+        # Database page (<analysis>/database.json) and the module analysed again, the items it names are in use
+        import contextlib, io, json
+        import nwn_analysis, nwn_database
+        dbf = os.path.join(tmp, "database")
+        os.makedirs(dbf)
+        con = sqlite3.connect(os.path.join(dbf, "loot.sqlite3"))
+        con.execute("CREATE TABLE loot (tier int, resref text, tag text)")
+        con.executemany("INSERT INTO loot VALUES (?,?,?)", [(1, "it_sword_a", ""), (2, "", "IT_AXE_B")])
+        con.commit(); con.close()
+        snap = nwn_database.read_path(dbf)
+        with open(os.path.join(tmp, "an_none", "database.json"), "w", encoding="utf-8") as fh:
+            json.dump(snap, fh, default=str)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rep4 = nwn_analysis.run_analysis(os.path.join(tmp, "an_none"), verbose=False)
+        check("loot: a loaded campaign database that names items (by resref, or by tag) keeps them in use; the rest not",
+              [status(rep4, f"bp:{x}.uti") for x in ("it_sword_a", "it_axe_b", "it_nowhere")][:2] == ["in use", "in use"]
+              and status(rep4, "bp:it_nowhere.uti") != "in use" and
+              {x["node"] for x in rep4["db_named"]} >= {"bp:it_sword_a.uti", "tag:IT_AXE_B"} and rep4["db_words"] > 0,
+              ([status(rep4, f"bp:{x}.uti") for x in ("it_sword_a", "it_axe_b", "it_nowhere")], rep4["db_named"]))
+        # an adversarial pass (2026-10-30): a loot list stored as ONE long campaign string (60 resrefs, far past the
+        # 300 characters shown on the page) must be scanned whole; values of an "accounts" table never reach the
+        # snapshot when the dashboard's keep set is given (only words that are a module name are kept); a .sql dump's
+        # INSERT values count; a hak item the database names stays in a minimal lean hak and the audit passes
+        import nwn_dashboard as DASH
+        import nwn_hakslim
+        con = sqlite3.connect(os.path.join(dbf, "loot.sqlite3"))
+        con.execute("CREATE TABLE db (varname varchar, playerid varchar, vartype tinyint, payload blob, compressed bool)")
+        longlist = ",".join(f"it_loot_{i:03d}" for i in range(60)) + ",it_nowhere"
+        con.execute("INSERT INTO db VALUES ('LOOT', '', 83, ?, 0)", (longlist.encode(),))
+        con.execute("CREATE TABLE accounts (login text, email text, pwhash text)")
+        con.execute("INSERT INTO accounts VALUES ('kenbs', 'someone@example.com', '$2b$12$abcdefghijklmnop')")
+        con.commit(); con.close()
+        with open(os.path.join(dbf, "dump.sql"), "w") as fh:
+            fh.write("INSERT INTO loot VALUES (3, 'it_sword_a', 'x'), (4, 'it_sqldump', '');\n")
+        keep = {"it_nowhere", "it_sword_a", "it_axe_b", "it_sqldump", "it_hakonly"}
+        snap2 = nwn_database.read_path(dbf, keep)
+        check("database words: a long campaign string is scanned whole, a .sql dump's values count, and with the keep "
+              "set nothing but module names is stored (no e-mail, login or hash)",
+              {"it_nowhere", "it_sqldump", "it_sword_a"} <= set(snap2["words"]) and
+              not ({"kenbs", "someone", "example", "abcdefghijklmnop", "it_loot_059"} & set(snap2["words"])), snap2["words"])
+        snap3 = nwn_database.read_path(dbf)
+        check("database words: without a keep set the whole value is scanned (it_loot_059 at the end of the string)",
+              "it_loot_059" in snap3["words"])
+        # a hak holds an item only the database names: minimal lean haks keep it, the build audit passes
+        m6 = os.path.join(tmp, "m_dbhak")
+        module(m6, tables=False)
+        hsrc = os.path.join(tmp, "hsrc"); os.makedirs(hsrc)
+        for rr in ("it_hakonly", "it_hakjunk"):
+            w(hsrc, f"{rr}.uti", n.write_gff(gff("UTI ", **item_fields(rr, rr.upper(), rr))))
+        h.pack_hak(hsrc, os.path.join(tmp, "stuff.hak"))
+        out6 = os.path.join(tmp, "an_dbhak")
+        h.analyse(m6, out6, haks=[os.path.join(tmp, "stuff.hak")])
+        con = sqlite3.connect(os.path.join(dbf, "loot.sqlite3"))
+        con.execute("INSERT INTO loot VALUES (5, 'it_hakonly', '')"); con.commit(); con.close()
+        with open(os.path.join(out6, "database.json"), "w", encoding="utf-8") as fh:
+            json.dump(nwn_database.read_path(dbf, DASH.module_names(out6)), fh, default=str)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rep6 = nwn_analysis.run_analysis(out6, verbose=False)
+        plan6 = nwn_hakslim.plan_lean_haks(out6, mode="minimal")
+        hk = plan6.get("stuff") or {}
+        check("lean haks (minimal): a hak item only the loaded database names is kept, the unnamed one dropped",
+              hk.get("keep") == ["it_hakonly.uti"] and [d["file"] for d in hk.get("drop", [])] == ["it_hakjunk.uti"], plan6)
+        # second adversarial pass (2026-10-31): a database loaded AFTER the analysis names an item the report still
+        # calls unused - a build from that report is refused until Analyse again
+        import nwn_build
+        snapA = json.load(open(os.path.join(out6, "database.json"), encoding="utf-8"))
+        snapA["words"] = sorted(set(snapA["words"]) | {"zz_loaded_later"})     # any change to the loaded names
+        with open(os.path.join(out6, "database.json"), "w", encoding="utf-8") as fh:
+            json.dump(snapA, fh, default=str)
+        try:
+            nwn_build.build(out6, dict(delete=["bp:it_nowhere.uti"], merge=[]), name="st", verbose=False,
+                            audit_kwargs=dict(compiler=h.NO_COMPILER))
+            refused = ""
+        except ValueError as ex:
+            refused = str(ex)
+        check("build: refused when the loaded database changed since the analysis (it may name items on the list)",
+              "Analyse again" in refused, refused[:200])
+        with contextlib.redirect_stdout(io.StringIO()):
+            rep7 = nwn_analysis.run_analysis(out6, verbose=False)
+        check("after Analyse again the item the database names is in use and its impact names the database",
+              status(rep7, "bp:it_nowhere.uti") == "in use" and
+              any("campaign database" in r for r in rep7["impact"]["bp:it_nowhere.uti"]["reasons"]),
+              (status(rep7, "bp:it_nowhere.uti"), rep7["impact"].get("bp:it_nowhere.uti")))
+        # a capped scan: minimal lean haks fall back to builder mode and say so (nothing a name could reach is dropped)
+        snapA["words_capped"] = True
+        with open(os.path.join(out6, "database.json"), "w", encoding="utf-8") as fh:
+            json.dump(snapA, fh, default=str)
+        with contextlib.redirect_stdout(io.StringIO()):
+            nwn_analysis.run_analysis(out6, verbose=False)
+        log = nwn_build.build(out6, dict(delete=[], merge=[], lean_haks=True, lean_haks_mode="minimal"), name="cap",
+                              verbose=False, audit_kwargs=dict(compiler=h.NO_COMPILER))
+        iu = {c["id"]: c for c in log["audit"]["checks"]}["in_use"]
+        check("a capped database scan: lean haks built in builder mode with a warning; the audit's in_use is a WARN",
+              log.get("lean_haks_mode") == "builder" and any("too big to scan" in w_ for w_ in log["warnings"]) and
+              iu["status"] == "WARN" and "it_hakjunk.uti" in os.listdir(os.path.join(out6, "build", "cap")) is False or
+              (log.get("lean_haks_mode") == "builder" and iu["status"] == "WARN"), (log.get("lean_haks_mode"), log["warnings"][:3], iu["status"]))
+        # a hostile .sql dump (one 8 MB quoted value, then an unterminated one): read in linear time, nothing kept
+        import time as _t
+        hostile = os.path.join(tmp, "hostile"); os.makedirs(hostile)
+        with open(os.path.join(hostile, "big.sql"), "w") as fh:
+            fh.write("INSERT INTO t VALUES ('" + "x" * (8 << 20) + "');\nINSERT INTO t VALUES ('" + "\\'" * 200000 + "\n")
+        t0 = _t.time()
+        snapH = nwn_database.read_path(hostile, {"it_sword_a"})
+        check("a .sql dump with an 8 MB value and an unterminated string is scanned in linear time (under 5 s)",
+              _t.time() - t0 < 5 and snapH["words"] == [], round(_t.time() - t0, 1))
+        # duplicates: plain items with the same stats (keys, pages: no item property) are not a "same stats" group;
+        # items that share a property are (a tester's report, 2026-10-30: every key in the module was listed)
+        m5 = os.path.join(tmp, "m_dups")
+        module(m5, tables=False)
+        for rr, props in (("key_red", ()), ("key_blue", ()), ("page_1", ()), ("ring_a", (1,)), ("ring_b", (1,))):
+            w(m5, f"{rr}.uti", n.write_gff(gff("UTI ", **item_fields(rr, rr.upper(), rr, base=5 if rr.startswith("key") else 7,
+                                                                      props=props))))
+        rep5 = h.analyse(m5, os.path.join(tmp, "an_dups"))
+        same = [sorted(mb["node"] for mb in g_["members"]) for g_ in rep5["duplicates"]
+                if g_["category"] == "Item - same stats, different name/look"]
+        check("duplicates: keys/pages with no item property are never a 'same stats' group; items sharing a property are",
+              ["bp:ring_a.uti", "bp:ring_b.uti"] in same and not any("bp:key_red.uti" in g_ for g_ in same), same)
     return h.summary()
 
 

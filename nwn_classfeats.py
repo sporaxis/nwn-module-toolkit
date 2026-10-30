@@ -25,7 +25,8 @@ What is checked (only custom content: a table from the module or a hak; Beamdog'
   class_feat_table_missing  a custom classes.2da names a feat table no hak, the module or the game has (error)
   class_feat_null           a row of a custom feat table whose FeatIndex is **** (info: disputed, see above)
   class_feat_missing        a row pointing past the end of feat.2da, or at a feat row that is blank (deleted)
-                            (warning) - checked in custom feat tables, and in every table when feat.2da is custom
+                            (error; a note while a listed hak is missing) - checked in custom feat tables, and in
+                            every table when feat.2da is custom
   class_feat_no_name        the feat exists but its name (feat.2da FEAT column) is **** or not in the talk table
                             (warning) - same tables as class_feat_missing; the talk-table part only when the talk
                             table it points into was read
@@ -163,8 +164,10 @@ def check(res, tlks, hint=""):
                                    "known to break anything for certain; some builders link them to a rare level-up "
                                    "error that relogging clears." + tail))
         if missing:
-            # with a listed hak missing, the feat.2da read may not be the one players get: a note, saying so
-            out.append(dict(severity="info" if hint else "warning", category="class_feat_missing", node=node,
+            # with a listed hak missing, the feat.2da read may not be the one players get: a note, saying so.
+            # Otherwise an error (the tester who proposed the check, 2026-10-30): the feat can't be taken, and
+            # a character who has it loses it from the radial menu and feat list
+            out.append(dict(severity="info" if hint else "error", category="class_feat_missing", node=node,
                             label=label,
                             detail=f"{len(missing)} row(s) of {tbl}.2da point at a feat that doesn't exist: "
                                    f"{_rows_text(missing, len(missing))}. The feat can't be picked when levelling up, and a "

@@ -762,7 +762,9 @@ def report_parts(name):
         with open(os.path.join(analysis_dir(nm), "report.json"), encoding="utf-8") as fh:
             rep = json.load(fh)
         return dict(summary=rep.get("summary") or {}, var_audit=rep.get("var_audit") or {},
-                    inferred_quests=rep.get("inferred_quests") or {}, unused_scripts=nwn_modsettings.unused_scripts(rep))
+                    inferred_quests=rep.get("inferred_quests") or {}, unused_scripts=nwn_modsettings.unused_scripts(rep),
+                    db_named=rep.get("db_named") or [], db_words=rep.get("db_words") or 0,
+                    db_named_count=rep.get("db_named_count") or 0, db_words_sig=rep.get("db_words_sig") or "")
     return REPORT_PARTS.get(name, build)
 
 
@@ -975,7 +977,17 @@ def database_view(name, snap=None):
         finally:
             db.close()
     uses, consts = DB_USES.get(name, work_out)
-    out = nwn_database.cross_check(snap, uses, report_parts(name)["unused_scripts"], consts)
+    parts = report_parts(name)
+    out = nwn_database.cross_check(snap, uses, parts["unused_scripts"], consts)
+    # blueprints and tags the loaded database names count as in use once analysed with it (nwn_analysis.database_words):
+    # the page says how many, and asks for Analyse again when the loaded files changed since
+    rep_named = parts.get("db_named") or []
+    out["named"] = dict(count=parts.get("db_named_count", len(rep_named)), examples=[x["label"] for x in rep_named[:12]],
+                        analysed_words=parts.get("db_words", 0), loaded_words=len(snap.get("words") or []),
+                        # the analysis counts the words it saw by a signature, so files with the same number of
+                        # words but other names still ask for Analyse again
+                        stale=nwn_analysis.words_signature(snap.get("words") or []) != parts.get("db_words_sig", ""),
+                        has_words="words" in snap, capped=bool(snap.get("words_capped")))
     s_ = settings()
     guess = os.path.join(s_["nwn_user"], "database") if s_.get("nwn_user") else ""
     out["suggested_folder"] = guess if guess and os.path.isdir(guess) else ""
@@ -1011,6 +1023,25 @@ def upload_database_file(q, data):
     return dict(ok=True, name=name, bytes=len(data))
 
 
+def module_names(d):
+    """The names a loaded database may refer to: every blueprint resref and every tag in the analysis' index (lower
+    case) - what nwn_database.read_path keeps from the database's words. Read-only; None when the index can't be read
+    (the caller refuses rather than storing an empty word list that would look like 'the database names nothing')."""
+    try:
+        db = n.sqlite_ro(os.path.join(d, "index.sqlite"))
+    except Exception:  # noqa
+        return None
+    try:
+        out = set()
+        for (nid,) in db.execute("SELECT node FROM nodes WHERE node LIKE 'bp:%' OR node LIKE 'tag:%'"):
+            out.add((nid[3:].rpartition(".")[0] if nid.startswith("bp:") else nid[4:]).lower())
+        return out
+    except Exception:  # noqa - an index from a run that never finished: nothing to keep words for
+        return None
+    finally:
+        db.close()
+
+
 def load_database(b):
     """Read campaign database files into the analysis' snapshot (database.json), or remove it (b["clear"]).
 
@@ -1025,12 +1056,16 @@ def load_database(b):
         if os.path.isfile(p):
             os.remove(p)
         return database_view(b.get("a"), {})
+    keep = module_names(d)                      # only words that are a name of this module are kept (privacy)
+    if keep is None:
+        raise ValueError("the analysis' index can't be read (index.sqlite missing or damaged) - Analyse again, then load "
+                         "the database files")
     if b.get("uploaded"):                       # files picked in the browser (see upload_database_file)
         up = os.path.join(d, DB_UPLOAD)
         if not os.path.isdir(up) or not os.listdir(up):
             raise ValueError("no database files were received - pick them again")
         try:
-            snap = nwn_database.read_path(up)
+            snap = nwn_database.read_path(up, keep)
         finally:
             shutil.rmtree(up, ignore_errors=True)   # the data is in the snapshot; the copies aren't kept
         snap["folder"] = "files you picked: " + ", ".join(f["file"] for f in snap["files"])[:400]
@@ -1038,7 +1073,7 @@ def load_database(b):
         path = field(b, "path", str, "")
         if not path.strip():
             raise ValueError("type or browse to the database folder (or pick the files)")
-        snap = nwn_database.read_path(path)
+        snap = nwn_database.read_path(path, keep)
     with open(p + ".tmp", "w", encoding="utf-8") as fh:
         json.dump(snap, fh, ensure_ascii=False, default=str)
     os.replace(p + ".tmp", p)
@@ -1908,7 +1943,7 @@ def impact_detail(name, node):
     if node not in g.nodes:
         raise ValueError("unknown node")
     _loaded, server_values = nwn_analysis.server_config_values(analysis_dir(name))
-    return g.impact(node, detail=True, live=g.live(server_values))
+    return g.impact(node, detail=True, live=g.live(server_values, nwn_analysis.database_words(analysis_dir(name))))
 
 
 def find_objects(name, q, limit=60):
@@ -2174,7 +2209,7 @@ def export_static(name, demo_note=None, logs=None, embed_limit=4_000_000):
     ranked = sorted(rep.get("impact", {}).items(), key=lambda kv: order.get(kv[1].get("level"), 5))
     details, left, skipped_detail = {}, EXPORT_DETAIL_MAX_BYTES, 0
     with LOCK:
-        live = g.live(nwn_analysis.server_config_values(d)[1])     # once: the same live set for every chain
+        live = g.live(nwn_analysis.server_config_values(d)[1], nwn_analysis.database_words(d))   # once for every chain
         sources = {r[0]: r[1] for r in db.execute("SELECT name, source FROM scripts")}
     # The walks only read the in-memory graph (never the connection), so they run without LOCK and other requests
     # are not held up for the seconds this can take.

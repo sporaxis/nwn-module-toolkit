@@ -46,6 +46,14 @@ import nwn_zstd
 from nwn_modsettings import SECRET_RE
 
 MAX_ROWS = 50000               # rows read per database file
+# Names stored in a database (a tester keeps his loot tables there: the item resrefs scripts read from it count as in
+# use, 2026-10-30): every word 3-16 characters long in every text value of every table is kept in the snapshot's
+# "words", so the analysis can match them against blueprint resrefs and tags. Capped so a huge database stays cheap.
+MAX_WORD_CELLS = 50_000_000    # cells scanned for words, over all files (the byte cap below bounds the cost)
+MAX_SQL_VALUE = 1 << 20        # characters of one quoted value in a .sql dump scanned for words
+MAX_WORDS = 300_000            # distinct words kept (before `keep` narrows them to the module's own names)
+MAX_WORD_BYTES = 256 << 20     # decoded text scanned for words, over all files (a crafted file of 16 MB values)
+WORD_RE = re.compile(r"[A-Za-z0-9_-]{3,32}")   # a resref is at most 16 characters, a tag 32 (a longer tag never matches)
 MAX_FILE = 512 << 20           # files bigger than this are listed, not read
 MAX_VALUE = 300                # characters of a value kept
 EXAMPLES = 25                  # values kept per variable
@@ -88,12 +96,14 @@ def _object_text(blob):
         return f"(object, {len(blob)} bytes)"
 
 
-def _decode(vtype, payload, compressed=False):
+def _decode(vtype, payload, compressed=False, full=False):
     """Turn a stored value into text for display.
 
     vtype: "int", "float", "string", "vector", "location", "object" or "" (unknown). payload: what the column held
     (number, text, bytes or None). compressed: the row's `compressed` flag. Returns a number for int/float values,
-    else text of at most MAX_VALUE characters. Never raises: an unreadable value becomes a description of itself."""
+    else text of at most MAX_VALUE characters - the whole text with full=True (the word scan: a loot list stored as
+    one long string must not lose its tail; an adversarial test, 2026-10-30). Never raises: an unreadable value
+    becomes a description of itself."""
     if payload is None:
         return ""
     if isinstance(payload, (int, float)):
@@ -120,7 +130,7 @@ def _decode(vtype, payload, compressed=False):
     # more than 3 control characters (other than tab/newline/CR...) in the first 200: show it as hex, not text
     if sum(1 for ch in txt[:200] if ord(ch) < 9 or 13 < ord(ch) < 32) > 3:
         return f"(binary, {len(raw)} bytes) " + raw[:24].hex()
-    return _short(txt)
+    return txt if full else _short(txt)
 
 
 def _copy(path, tmp):
@@ -135,7 +145,28 @@ def _copy(path, tmp):
     return dst
 
 
-def _sqlite_file(path, tmp):
+def _collect_words(acc, text):
+    """Add the words of one text value to `acc` (dict: words -> set, cells / bytes -> counts, keep -> set or None).
+    With `keep` (the module's own resrefs and tags, lower case) only those words are kept, so the snapshot never
+    holds a player's name, e-mail or a password hash - only words that ARE a name of this module. Returns False once
+    a cap is reached (cells, decoded bytes or distinct words), so callers stop scanning; `capped` is set then."""
+    acc["cells"] += 1
+    acc["bytes"] += len(text)
+    if acc["cells"] > MAX_WORD_CELLS or acc["bytes"] > MAX_WORD_BYTES:
+        acc["capped"] = True
+        return False
+    keep = acc.get("keep")
+    for m in WORD_RE.findall(text):
+        w = m.lower()
+        if keep is None or w in keep:
+            acc["words"].add(w)
+            if len(acc["words"]) > MAX_WORDS:
+                acc["capped"] = True
+                return False
+    return True
+
+
+def _sqlite_file(path, tmp, words=None):
     """Read an SQLite database (via a copy in `tmp`): the EE campaign table `db` row by row, and for every other table
     its columns, row count and first 20 rows. Returns dict(kind, rows, tables, meta, total_rows); only SELECT and
     PRAGMA statements are run, and only on the copy."""
@@ -170,6 +201,29 @@ def _sqlite_file(path, tmp):
                 sample.append(["(set - hidden)" if SECRET_RE.search(cols[t][i]) else
                                _short(x if not isinstance(x, bytes) else _decode("", x)) for i, x in enumerate(r)])
             out["tables"][t] = dict(columns=cols[t], rows=n, sample=sample)
+        if words is not None:
+            # every text cell of every table, campaign rows included (their payloads decoded): names scripts read.
+            # Never from a column whose name looks secret, nor from a campaign row whose variable name does (the
+            # same rule that hides those values, SECRET_RE): a password is not a name
+            for t in tables:
+                going = True
+                keep = [i for i, c in enumerate(cols[t]) if not SECRET_RE.search(c)]
+                vn_col = cols[t].index("varname") if t == "db" and is_campaign else -1
+                for r in con.execute(f"SELECT * FROM {quoted[t]}"):
+                    if vn_col >= 0 and SECRET_RE.search(str(r[vn_col] or "")):
+                        continue
+                    for i in keep:
+                        x = r[i]
+                        if isinstance(x, bytes):
+                            x = _decode("", x, full=True)
+                        if isinstance(x, str):
+                            going = _collect_words(words, x)
+                            if not going:
+                                break
+                    if not going:
+                        break
+                if not going:
+                    break
         return out
     finally:
         con.close()
@@ -258,12 +312,45 @@ SQL_TABLE_RE = re.compile(r"(?i)\bcreate\s+table\s+(?:if\s+not\s+exists\s+)?[`\"
 SQL_INSERT_RE = re.compile(r"(?i)\binsert\s+(?:or\s+\w+\s+|ignore\s+)?into\s+[`\"\[]?(\w+)")
 
 
-def _sql_dump(path, tmp):
+def _sql_values(txt):
+    """Yield the text of every single-quoted value in an SQL dump, in one pass over `txt` (linear time, no
+    backtracking): '' inside a value is a quote, a backslash escapes the next character, and a value never closed
+    runs to the end. Each value is cut to MAX_SQL_VALUE characters. Never raises."""
+    i, n_ = 0, len(txt)
+    while True:
+        i = txt.find("'", i)
+        if i < 0:
+            return
+        j = i + 1
+        while j < n_:
+            c = txt[j]
+            if c == "\\":
+                j += 2
+            elif c == "'":
+                if j + 1 < n_ and txt[j + 1] == "'":
+                    j += 2
+                else:
+                    break
+            else:
+                j += 1
+        yield txt[i + 1: min(j, i + 1 + MAX_SQL_VALUE)]
+        i = j + 1
+
+
+def _sql_dump(path, tmp, words=None):
     """A text dump (mysqldump / sqlite .dump): tables and roughly how many rows are inserted.
 
     Reads at most the first 64 MB with a read-only open (`tmp` is not used); no SQL is run. Row counts are an
     estimate: one per INSERT plus one per "),(" between multi-row VALUES groups. No values are kept."""
     txt = open(path, "rb").read(64 << 20).decode("utf-8", "replace")
+    if words is not None:
+        # the values inside INSERT statements ('...' strings): a loot table only a dump can bring in (NWNX / MySQL).
+        # A plain scan, not a regex: a backtracking pattern over a 64 MB quoted blob kept a frame per character
+        # (gigabytes) and an unterminated string made it quadratic (an adversarial test, 2026-10-31). '' and \x are
+        # escapes; a value longer than MAX_SQL_VALUE is cut (a dumped blob is never a loot list)
+        for val in _sql_values(txt):
+            if not _collect_words(words, val):
+                break
     tables = {}
     for m in SQL_TABLE_RE.finditer(txt):
         body = txt[m.end(): txt.find(";", m.end())]
@@ -280,16 +367,21 @@ def _sql_dump(path, tmp):
     return dict(kind="SQL dump", rows=[], tables=tables, meta={}, total_rows=0)
 
 
-def read_path(path):
+def read_path(path, keep=None):
     """Read a database folder (or one file) and return a snapshot of what is stored.
 
     path: a folder (every .sqlite3/.sqlite/.db/.dbf/.sql in it, not sub-folders) or one such file; surrounding
-    quotes and spaces are ignored. Returns dict(folder, loaded, files, campaign, tables):
+    quotes and spaces are ignored. keep: the module's own names (blueprint resrefs and tags, lower case) - with it
+    only words that are such a name are kept in `words` (the dashboard always passes it: nothing personal a database
+    holds - player names, e-mail addresses, password hashes - ever reaches the snapshot); None keeps every word.
+    Returns dict(folder, loaded, files, campaign, tables, words):
         files     one entry per file: file, size, modified, db (name without extension), kind, and rows, tables,
                   import_done when it was read or a note when it was not
         campaign  {database name: {sources, vars: {variable: {types, rows, players, module_wide, examples, in_files}},
                    players (count)}}
         tables    {database name: {table: {columns, rows, sample}}} for tables other than the campaign's own
+        words     every word (3-16 characters, lower case) found in any text value, so the analysis can count the
+                  blueprints the database names as in use (words_capped: True when the scan stopped at a cap)
     A file that can't be read is listed with kind "unreadable" and a note; it does not stop the others.
     Raises ValueError when the path does not exist or is not a database file.
 
@@ -308,6 +400,7 @@ def read_path(path):
             raise ValueError("pick a database folder, or a .sqlite3 / .sqlite / .db / .dbf / .sql file")
         folder, files = os.path.dirname(path), [path]
     snap = dict(folder=folder, loaded=time.strftime("%Y-%m-%d %H:%M"), files=[], campaign={}, tables={})
+    words = dict(words=set(), cells=0, bytes=0, capped=False, keep=keep)
     tmp = tempfile.mkdtemp(prefix="nwn_db_")
     try:
         for f in files:
@@ -322,8 +415,16 @@ def read_path(path):
                 continue
             try:
                 low = f.lower()
-                r = _dbf_file(f, tmp) if low.endswith(".dbf") else _sql_dump(f, tmp) if low.endswith(".sql") \
-                    else _sqlite_file(f, tmp)
+                r = _dbf_file(f, tmp) if low.endswith(".dbf") else _sql_dump(f, tmp, words) if low.endswith(".sql") \
+                    else _sqlite_file(f, tmp, words)
+                if low.endswith(".dbf"):
+                    for row in r["rows"]:                # .DBF values were read already (memo text, whole)
+                        if row.get("value") == "(set - hidden)":
+                            continue                     # a secret-named variable: its value is never a name
+                        if isinstance(row.get("value"), str) and not _collect_words(words, row["value"]):
+                            break
+                    if r.get("total_rows", 0) > MAX_ROWS:
+                        words["capped"] = True           # rows past MAX_ROWS were not read
             except Exception as ex:                      # one damaged file must not stop the rest
                 ent.update(kind="unreadable", note=str(ex)[:300])
                 snap["files"].append(ent)
@@ -361,6 +462,9 @@ def read_path(path):
         shutil.rmtree(tmp, ignore_errors=True)           # the temporary copies, always removed
     for c in snap["campaign"].values():
         c["players"] = len(c["players"])                 # a set while collecting; a count in the snapshot (JSON)
+    snap["words"] = sorted(words["words"])
+    snap["words_capped"] = bool(words["capped"])
+    snap["words_kept_to"] = len(keep) if keep is not None else None   # how many module names were looked for
     return snap
 
 

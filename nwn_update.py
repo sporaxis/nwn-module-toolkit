@@ -118,6 +118,9 @@ REANALYSE = [
     # a false loss where a server (or the user's own) override holds a copy of a module file
     dict(key="override_edges", since="1.5.7",
          what="Server override folders (Overview) and an audit that tells the override's references from the module's"),
+    # same_stats_rules 1: "same stats, different name/look" only among items with a property (keys, pages never)
+    dict(key="same_stats_rules", since="1.5.8",
+         what="Duplicates: no more 'same stats' groups of keys and pages (only items with a property are grouped)"),
 ]
 
 # --- (a) bringing work across -------------------------------------------------------------------------------

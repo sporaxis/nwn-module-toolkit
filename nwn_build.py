@@ -546,6 +546,14 @@ def build(analysis_dir, plan, out_dir=None, name=None, run_audit=True, verbose=T
     nwn_update.check_work(analysis_dir)
     plan = validate_plan(plan)
     rep = json.load(open(os.path.join(analysis_dir, "report.json"), encoding="utf-8"))
+    # the Safe to delete list the plan ticks came from must have seen the campaign database loaded now: a database
+    # loaded or changed after the analysis names items the report still calls unused (an adversarial test, 2026-10-31)
+    import nwn_analysis
+    db_words = nwn_analysis.database_words(analysis_dir)
+    if nwn_analysis.words_signature(db_words) != (rep.get("db_words_sig") or nwn_analysis.words_signature(())):
+        raise ValueError("the campaign database loaded on the Database page changed since this analysis (or was loaded "
+                         "after it): what it names may be on the Safe to delete list. Press Analyse again, check the "
+                         "list, then build. Nothing was changed.")
     db = sqlite3.connect(os.path.join(analysis_dir, "index.sqlite"))
     meta_ = dict(db.execute("SELECT key, value FROM meta").fetchall())
     module_path = meta_["module_path"]

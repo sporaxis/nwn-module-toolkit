@@ -560,7 +560,7 @@ counts):
 | Category | Severity | What it means |
 |---|---|---|
 | `class_feat_null` | info | A row with no feat (`FeatIndex` is `****`). A note only: class packs have used empty rows for years without trouble, though some builders link them to a rare level-up error that relogging clears |
-| `class_feat_missing` | warning | A row pointing past the end of `feat.2da`, or at a blank (deleted) feat row. The feat can't be picked, and a character who already has it doesn't see it in the radial menu or the feat list |
+| `class_feat_missing` | error | A row pointing past the end of `feat.2da`, or at a blank (deleted) feat row. The feat can't be picked, and a character who already has it doesn't see it in the radial menu or the feat list |
 | `class_feat_no_name` | warning | The feat has no name: its `FEAT` column is `****`, or the talk-table entry it names doesn't exist. It shows blank in the level-up list |
 | `class_feat_table_missing` | error | A custom `classes.2da` names a feat table no hak, the module or the game has: the class has no feat list. A note when a hak is missing or the game folder isn't set |
 
@@ -704,7 +704,9 @@ is opened (nothing is re-analysed, and only `palette.json` and `reports/palette.
 folder). Like a clean build, it counts the module and its haks only, not your own override folder.
 
 ### 5.5 Duplicates
-Identical blueprints, scripts, conversations and assets; items with the same stats; shared tags; same names. A
+Identical blueprints, scripts, conversations and assets; items with the same stats (only items that have at least one
+item property - keys, quest pages and other plain items differ by name and look alone, so they are never grouped);
+shared tags; same names. A
 **keeper** is suggested: the in-use, compiled, most-referenced copy. Groups marked *mergeable* can be merged by the
 build. The others need a human decision, and the box under the group says why. Each member is its own file: the
 **File (resref)** column shows its name, so "Iron Sword [sword_a.uti]" and "Iron Sword [sword_b.uti]" are two files
@@ -962,6 +964,14 @@ What the module keeps between server restarts: **campaign databases** (`SetCampa
 - **Good to know**: databases the scripts use with no file in the loaded folder (normal for a fresh server), files no
   script in this module uses (the folder is shared by every module), stored values nothing uses, old `.DBF` copies EE
   has already imported, `DestroyCampaignDatabase` calls, and SQL tables the queries use.
+- **What the database keeps in use.** Some worlds keep loot tables, random-gear lists or spawn lists in the database,
+  so the items they name are used though no module file names them. Once files are loaded, press **Analyse again**:
+  every blueprint whose resref, and every tag, that appears as a word in a stored value counts as in use (the page
+  says how many, with examples, **Safe to delete** leaves them alone and the Impact explorer says so on each). Only
+  words that are a name of this module are kept from the files - never a player's name, e-mail or password - and a
+  tag with spaces or punctuation can't be matched. `.sql` dumps' INSERT values count too. The page asks for Analyse
+  again whenever the loaded files changed since the analysis (or were forgotten). Very large databases are scanned
+  up to a cap, and the page says so. Lean haks and the build audit count these names as well.
 - Tabs: Databases, Variables (who writes/reads each, stored values per character), SQL, Files, Script lines.
 
 ### 5.12 Performance

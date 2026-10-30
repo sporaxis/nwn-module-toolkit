@@ -556,6 +556,11 @@ def test_database(tmp):
     check("database: old BioWare .DBF files are read (memo text)",
           snap["campaign"]["othermod"]["vars"]["note"]["examples"][0]["value"] == "left by another module", snap["campaign"].get("othermod"))
     check("database: SQL tables in a campaign database are listed", snap["tables"]["qa9db"]["bank"]["rows"] == 1, snap["tables"])
+    # the words stored anywhere in the files (a loot table kept in the database names item resrefs): every table,
+    # compressed values decoded, .DBF memo text too; secrets' values never (a tester's report, 2026-10-30)
+    check("database: words in every stored value are kept for the analysis (tables, compressed values, .DBF memos)",
+          {"nw_wswls001", "sword1", "hero", "oakvale", "pca", "left", "another"} <= set(snap["words"]) and
+          "hunter2" not in snap["words"] and snap["words_capped"] is False, snap["words"][:20])
 
     idx = sqlite3.connect(":memory:")
     idx.execute("CREATE TABLE scripts (name TEXT, source TEXT)")

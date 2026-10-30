@@ -210,6 +210,7 @@ class Graph:
             if k == "contains":
                 self.parent[d] = s
         self._live = (None, None)       # (server_values, live set) of the last live() call
+        self._db_roots = set()          # what the loaded campaign database named, from the last live() call
         # (src, dst) pairs every reference between which came from an override folder's copy (nwn_index
         # override_edges); an index from before 1.5.7 has no such table: none then
         try:
@@ -217,6 +218,17 @@ class Graph:
             self.has_override_pairs = True
         except sqlite3.Error:
             self.override_pairs, self.has_override_pairs = set(), False
+
+    def db_named(self, db_words):
+        """Blueprints whose resref, and tags whose text, a loaded campaign database holds as a word (db_words: lower
+        case, from database_words). A tag node leads to every object carrying the tag. Read-only."""
+        out = set()
+        for nid, nd in self.nodes.items():
+            if nid.startswith("bp:") and nd["in_module"] and nid[3:].rpartition(".")[0].lower() in db_words:
+                out.add(nid)
+            elif nid.startswith("tag:") and nid[4:].lower() in db_words:
+                out.add(nid)
+        return out
 
     def label(self, nid):
         """Readable label of a node, or the id itself for a node the graph doesn't have."""
@@ -430,6 +442,12 @@ class Graph:
             level = "None"
             reasons = ["Nothing in the module runs or references it"] + \
                 ([f"(would touch quest(s) {', '.join(sorted(quests))} if it were used)"] if quests else [])
+        if start in self._db_roots:
+            # named in the loaded campaign database (a loot table kept there): in use, whatever the module files say
+            reasons = ["Named in the loaded campaign database (Database page) - counts as in use"] + \
+                [r for r in reasons if not r.startswith("Nothing in the module")]
+            if level == "None":
+                level = "Low"
         return dict(level=level, reasons=reasons,
                     counts=dict(total=n_real, soft=n_soft, areas=len(areas), quests=len(quests),
                                 placed_copies=n_placed, **dict(sorted(by_type.items()))),
@@ -512,20 +530,26 @@ class Graph:
                     seen.add(dst); q.append(dst)
         return seen
 
-    def live(self, server_values=()):
+    def live(self, server_values=(), db_words=()):
         """The live set (see the module docstring): every node reachable from the roots - module.ifo, every loaded 2da,
-        every other loaded GFF file except palettes (journal, factions ...), every tag-based item script and the loaded
-        scripts the server's
-        settings name (server_values: the setting values from server_config_values; NWNX_UTIL_PRE_MODULE_START_SCRIPT
-        =pw_preload runs pw_preload although no module file names it). The last result is kept, so the dashboard
-        can ask for it on every item it shows. Read-only."""
-        key = frozenset(server_values)
+        every other loaded GFF file except palettes (journal, factions ...), every tag-based item script, the loaded
+        scripts the server's settings name (server_values: the setting values from server_config_values;
+        NWNX_UTIL_PRE_MODULE_START_SCRIPT=pw_preload runs pw_preload although no module file names it), and every
+        blueprint or tag a loaded campaign database names (db_words: database_words - a tester keeps his loot tables
+        in the database, so the items they list are in use though no module file names them). The last result is
+        kept, so the dashboard can ask for it on every item it shows. Read-only."""
+        key = (frozenset(server_values), frozenset(db_words))
         if self._live[0] != key:
             roots = {"module"}
             for nid, nd in self.nodes.items():
                 if nd["in_module"] and (nd["type"] == "2da" or (nid.startswith("file:") and not nid.endswith(".itp"))):
                     roots.add(nid)
-            roots |= {f"script:{v}" for v in key if self.nodes.get(f"script:{v}", {}).get("in_module")}
+            roots |= {f"script:{v}" for v in key[0] if self.nodes.get(f"script:{v}", {}).get("in_module")}
+            self._db_roots = self.db_named(key[1]) if key[1] else set()
+            roots |= self._db_roots
+            # an object carrying a tag the database names is held in use by it: say so on the object as well
+            for t in [r for r in self._db_roots if r.startswith("tag:")]:
+                self._db_roots |= {d for d, k, _v in self.fwd.get(t, []) if k == "tag_provider"}
             # tag-based item scripts: the game runs <tag>.nss when a player uses an item with that tag - and players
             # carry items no module file places (bought, looted, DM-given, kept in their characters for years), so
             # such a script is in use even when nothing in the module places the item (a tester's teleport stone)
@@ -1233,6 +1257,35 @@ def sha(s):
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 
+def words_signature(words):
+    """A short signature of a database's word list (sorted, lower case), kept in the report (db_words_sig) so the
+    Database page can tell whether the files loaded now are the ones the analysis saw. Never raises."""
+    import hashlib
+    return hashlib.sha256("\n".join(sorted(str(w).lower() for w in words)).encode("utf-8")).hexdigest()[:16]
+
+
+def database_capped(out_dir):
+    """True when the loaded campaign database's word scan stopped at a cap (database.json words_capped): names past
+    the cap are unknown, so decisions that drop content (minimal lean haks) must not rely on it. Never raises."""
+    try:
+        with open(os.path.join(out_dir, "database.json"), encoding="utf-8") as fh:
+            return bool(json.load(fh).get("words_capped"))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def database_words(out_dir):
+    """The words a loaded campaign database holds (<out_dir>/database.json "words", lower case; the Database page
+    loads it, nwn_database.read_path collects them) as a frozenset - the names scripts may read from it. Empty when
+    no database was loaded or the file can't be read. Never raises."""
+    try:
+        with open(os.path.join(out_dir, "database.json"), encoding="utf-8") as fh:
+            snap = json.load(fh)
+        return frozenset(str(w).lower() for w in (snap.get("words") or []) if isinstance(w, str))
+    except (OSError, ValueError, AttributeError):
+        return frozenset()
+
+
 def server_config_values(out_dir):
     """(loaded, values) from <out_dir>/server_config.json - the server settings loaded on the Overview page (secrets
     already masked by nwn_modsettings). values: every setting's value, lower case, with a .ncs/.nss ending removed, so
@@ -1410,7 +1463,10 @@ def run_analysis(out_dir, verbose=True):
     # Everything reachable from module.ifo, the loaded 2das and other GFF files, and the scripts the server's settings
     # name (when those settings were loaded: Overview > Server settings, then re-analyse) is "live" (Graph.live)
     server_cfg_loaded, server_values = server_config_values(out_dir)
-    live = g.live(server_values)
+    db_words = database_words(out_dir)
+    live = g.live(server_values, db_words)
+    # what the loaded database keeps in use (a note for the Database page and Safe to delete)
+    db_named = sorted(g.db_named(db_words)) if db_words else []
 
     # ------------------------------------------------------------- impact
     nwn_progress.stage("analysis", "Analysis: impact levels")
@@ -1690,16 +1746,21 @@ def run_analysis(out_dir, verbose=True):
     for (ext, h), nodes in by_hash.items():
         cat = "Conversation - identical" if ext == "dlg" else f"{'Item' if ext == 'uti' else 'Blueprint'} ({ext}) - identical"
         add_group(cat, nodes, "Same content, different resref (file name): separate files that make the same thing. Safe to merge: references are re-pointed to the keeper.", True)
-    # items - same function, different name/look
+    # items - same function, different name/look. Only items with at least one item property: plain items (keys,
+    # quest pages, scripting templates for random gear) are told apart by their name and look alone, so grouping
+    # every key or every page as "same stats" reported thousands of blueprints that were nothing of the kind (a
+    # tester's report, 2026-10-30)
     by_func = defaultdict(list)
     for it in items:
-        by_func[it["func_sig"]].append(it["node"])
+        if it["properties"]:
+            by_func[it["func_sig"]].append(it["node"])
     # the groups so far (all "identical"): a look-alike group with exactly the same members would add nothing
     identical_sets = [set(d["members"][i]["node"] for i in range(len(d["members"]))) for d in dups]
     for sig, nodes in by_func.items():
         if len(nodes) > 1 and set(nodes) not in identical_sets:
             add_group("Item - same stats, different name/look", nodes,
-                      "Identical properties/base item/cost but differs in name, tag or appearance. Review before merging.", False)
+                      "Identical item properties, base item and cost, but a different name, tag or appearance. Usually "
+                      "meant (a rename, a reskin); review before merging. Items with no properties are never grouped.", False)
     by_tag = defaultdict(list)
     for it in items:
         if it["tag"]:
@@ -2591,6 +2652,11 @@ def run_analysis(out_dir, verbose=True):
                   orphans=orphans, skins=skins, ai_findings=ai_findings, performance=performance,
                   duplicates=dups, merge_rules=2, noise_rules=2, area_details=1, missing_bp_notes=1, include_notes=1,
                   override_edges=int(g.has_override_pairs),
+                  # blueprints and tags a loaded campaign database names (kept in use; Database page), the words it
+                  # held when analysed, so the page can tell "loaded since - Analyse again"
+                  db_named=[dict(node=k, label=g.label(k)) for k in db_named[:5000]], db_named_count=len(db_named),
+                  db_words=len(db_words), db_words_sig=words_signature(db_words),
+                  same_stats_rules=1,
                   map_summary=map_summary,
                   asset_duplicates=asset_dups, deletions=deletions, areas=areas, conversations=convs, conversation_dynamic_starts=dyn_starts[:300], quests=quests,
                   inferred_quests=inferred, var_audit=var_audit, pw_performance=pw_perf, factions=factions, databases=databases,

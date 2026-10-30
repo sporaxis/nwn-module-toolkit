@@ -549,11 +549,17 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
     og = nwn_analysis.Graph(odb)
     cg = nwn_analysis.Graph(cdb)
 
+    # what a loaded campaign database names is in use on both sides (the database is the server's, the same for the
+    # original and the clean module; without it a minimal lean hak could drop such items with a PASS)
+    db_words = nwn_analysis.database_words(orig_dir)
+    g_db_named = og.db_named(db_words) if db_words else set()
+
     def roots_of(g, avoid=()):
-        """The module and its own files (palettes excluded: they list every blueprint, which is not a real use),
-        without the nodes in `avoid`."""
-        return {"module"} | {k for k, v in g.nodes.items() if v["in_module"] and k not in avoid and
-                             (v["type"] == "2da" or (k.startswith("file:") and not k.endswith(".itp")))}
+        """The module and its own files (palettes excluded: they list every blueprint, which is not a real use) and
+        what the loaded database names, without the nodes in `avoid`."""
+        return ({"module"} | {k for k, v in g.nodes.items() if v["in_module"] and k not in avoid and
+                              (v["type"] == "2da" or (k.startswith("file:") and not k.endswith(".itp")))}
+                | (g.db_named(db_words) if db_words else set()))
 
     def live(g):
         """Module nodes reachable from roots_of(g)."""
@@ -577,6 +583,9 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
     # tag: and var: nodes are names used at run time (object tags, local variables), not files: not counted here
     lost_all = sorted(k for k in (o_live | gone_too) - c_live if k not in removed_nodes and not k.startswith(("tag:", "var:")))
     lost = [k for k in lost_all if k not in override_only]
+    # a removed node the loaded database names is a loss whatever the plan said (the plan came from a report that
+    # may not have seen the database; nwn_build refuses that, this is the second lock)
+    lost += [f"{k} (named in the loaded campaign database)" for k in sorted(removed_nodes & g_db_named)]
     from_override = [k for k in lost_all if k in override_only]
     note = ([f"not counted: {len(from_override)} resource(s) the original found only in an override folder "
              f"(players don't get them, with or without this build), e.g. "
@@ -584,7 +593,12 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
     note += ([f"not counted: {len(through_override)} resource(s) in use only through override files (for example "
               f"items a loot table there lists; still in the clean module, the build kept them), e.g. "
               + ", ".join(og.label(k) for k in through_override[:5])] if through_override else [])
-    check("in_use", "Everything that was in use is still present and reachable", "FAIL" if lost else "PASS",
+    capped = nwn_analysis.database_capped(orig_dir)
+    if capped:
+        note.append("the loaded campaign database was too big to scan completely: items it names past the cap are "
+                    "not known to this check (minimal lean haks were not used for that reason)")
+    check("in_use", "Everything that was in use is still present and reachable",
+          "FAIL" if lost else ("WARN" if capped else "PASS"),
           ([f"no longer present/reachable: {og.label(k)}" for k in lost] or [f"{len(c_live)} in-use resources verified"])
           + note,
           "Reachability from module.ifo recomputed on both modules" + (" (against the lean haks)" if changes.get("lean_haks") else "") + ".")

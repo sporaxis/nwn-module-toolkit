@@ -2348,6 +2348,17 @@ VIEWS.database = async (m) => {
   let d; try { d = await api(`/api/database?a=${encodeURIComponent(S.cur)}`); } catch(e){ m.innerHTML = `<h1>Database</h1><div class="note warn">${esc(e.message)}</div>`; return; }
   dbRender(m, d);
 };
+// What the loaded database keeps in use: blueprints and tags named in its values count as in use (Safe to delete
+// leaves them alone) once the module is analysed with the files loaded - a tester keeps loot tables in the database.
+function dbNamedNote(nm, sm){
+  if (!sm.loaded) return nm.count ? `<div class="note warn small" style="margin-top:8px">The analysis still counts ${fmtN(nm.count)} blueprint(s) and tag(s) as in use from database files you have since forgotten. Press <b>Analyse again</b> (Overview) to drop them.</div>` : "";
+  if (!nm.has_words) return `<div class="note warn small" style="margin-top:8px">These files were loaded by an older version: read them again (<b>Read database folder</b> / <b>Load files…</b>), then <b>Analyse again</b>, so the blueprints and tags they name count as in use.</div>`;
+  const stale = !!nm.stale;
+  if (stale) return `<div class="note warn small" style="margin-top:8px">The loaded files hold ${fmtN(nm.loaded_words)} distinct words; the analysis was made ${nm.analysed_words ? "with other files" : "without them"}. Press <b>Analyse again</b> (Overview) so the blueprints and tags they name count as in use - loot tables kept in the database, for example.</div>`;
+  if (!nm.count) return `<div class="note small" style="margin-top:8px">No blueprint or tag of this module is named in the loaded files.</div>`;
+  return `<div class="note small" style="margin-top:8px"><b>${fmtN(nm.count)}</b> blueprint(s) and tag(s) are named in the loaded files and count as in use (Safe to delete leaves them alone; the Impact explorer says so on each): ${nm.examples.map(esc).join(", ")}${nm.count > nm.examples.length ? " …" : ""}${nm.capped ? " <span class=\"muted\">(the files were too big to scan completely - some names may be missed)</span>" : ""} <span class="muted">Only words that are a name of this module are kept from the files; a tag with spaces or punctuation can't be matched.</span></div>`;
+}
+
 // Draws the Database page from one /api/database reply; tabs: databases, variables, SQL, files, script lines.
 function dbRender(m, d){
   const sm = d.summary, F = d.findings || [];
@@ -2366,6 +2377,7 @@ function dbRender(m, d){
       <div class="tile"><div class="v">${fmtN(sm.sql_calls)}</div><div class="l">SQL queries (EE SQLite / NWNX)</div></div>
       <div class="tile"><div class="v">${fmtN(sm.files)}</div><div class="l">database files loaded${sm.stored_rows ? ` (${fmtN(sm.stored_rows)} stored values)` : ""}</div></div>
       <div class="tile"><div class="v" style="color:${sm.warnings ? "var(--warning-text)" : "inherit"}">${fmtN(sm.warnings)}</div><div class="l">warnings</div></div></div>
+    ${dbNamedNote(d.named || {}, sm)}
     <details class="card small"><summary><b>How campaign databases work</b></summary><p>A script stores a value with <span class="mono">SetCampaignInt("MyWorld", "SomeName", 5, oPC)</span> and reads it back with <span class="mono">GetCampaignInt("MyWorld", "SomeName", oPC)</span>. The first argument is the <b>database</b> - one file per name in the game's (or server's) <span class="mono">database</span> folder: <span class="mono">myworld.sqlite3</span> in EE, <span class="mono">MYWORLD.DBF/.CDX/.FPT</span> in the original game (EE converts those the first time). With a player as the last argument the value belongs to that character; without, it is shared by everyone. The value is found only with the <b>same name and the same type</b> (Int with Int, String with String) - a read that doesn't match gets 0 or an empty string, silently. The folder is shared by every module the game or server runs, so it can hold other modules' databases. EE scripts can also run SQL on a campaign database (<span class="mono">SqlPrepareQueryCampaign</span>) or on the module/character (<span class="mono">SqlPrepareQueryObject</span>, kept in the save game or character file); NWNX adds a server database (<span class="mono">NWNX_SQL_*</span>, MySQL/SQLite on the server).</p></details>
     ${warn.length ? `<h3>Needs a look (${warn.length})</h3>${warn.map(finding).join("")}` : `<div class="note small" style="margin-top:8px">No warnings: every campaign value the scripts read is also written, with the same type.</div>`}
     ${info.length ? `<details class="card small" style="margin-top:8px"><summary><b>Good to know (${info.length})</b></summary>${info.map(finding).join("")}</details>` : ""}

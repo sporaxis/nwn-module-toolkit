@@ -56,7 +56,7 @@ import sqlite3
 from collections import defaultdict, deque
 
 import nwnlib as n
-from nwn_analysis import ASSET_REVIEW_PATTERNS, PART_RE, Graph
+from nwn_analysis import ASSET_REVIEW_PATTERNS, PART_RE, Graph, database_words, database_capped
 
 # file types the engine (or a tool) loads by name: no reference to them is ever recorded, so minimal mode keeps them all
 ALWAYS_KEEP_EXT = {"2da", "tlk", "set", "ini", "txt", "ltr", "ssf", "mtr", "shd", "itp", "jui", "tml", "sql"}
@@ -119,6 +119,9 @@ def plan_lean_haks(analysis, mode="builder", aggressive=False, skip=()):
         # blueprint, which is not a real use) - the same roots the audit's "in_use" check uses
         roots = {"module"} | {k for k, v in g.nodes.items() if v["in_module"] and
                               (v["type"] == "2da" or (k.startswith("file:") and not k.endswith(".itp")))}
+        # ... and whatever a loaded campaign database names (a loot table kept there lists hak items; an adversarial
+        # test, 2026-10-30: a minimal lean hak dropped them while the Database page said "in use")
+        roots |= g.db_named(database_words(analysis))
         live = g.reachable(roots)
         keep_nodes, q = set(), deque()
         for fid, sid, resref, ext, size, node, relpath, sha in files:
@@ -289,6 +292,14 @@ def write_lean_haks(analysis, out_dir, mode="builder", aggressive=False, verbose
     Reads the original haks; never writes them. The written haks are uncompressed ERF V1.0 (nwnlib.write_erf_stream,
     one file in memory at a time) and keep the original's description; a lean hak that ends up larger than its
     compressed original is flagged (grew=True) and listed in manifest["warnings"]."""
+    extra_warnings = []
+    if mode == "minimal" and database_capped(analysis):
+        # the database scan stopped at a cap: names past it are unknown, and a minimal lean hak drops what nothing
+        # names - keep (rule 5): builder mode instead, and say so (an adversarial test, 2026-10-31)
+        mode = "builder"
+        extra_warnings.append("lean haks: the loaded campaign database was too big to scan completely, so items it "
+                              "names past the cap are unknown - haks were slimmed in builder mode (nothing a name "
+                              "could still reach was dropped), not minimal")
     plan = plan_lean_haks(analysis, mode, aggressive, skip)
     if not plan:
         return None
@@ -305,7 +316,7 @@ def write_lean_haks(analysis, out_dir, mode="builder", aggressive=False, verbose
     for f in existing_lean_haks(hd):
         os.remove(os.path.join(hd, f))
     manifest = dict(haks={}, rebuilt=list(rebuild), unchanged=[k for k in plan if k not in names], bytes_in=0,
-                    bytes_out=0, mode=mode, aggressive=aggressive)
+                    bytes_out=0, mode=mode, aggressive=aggressive, warnings=list(extra_warnings))
     for name in manifest["unchanged"]:
         # left alone: the clean module keeps loading the original hak under its own name, so nothing is written
         p = plan[name]

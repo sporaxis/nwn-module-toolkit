@@ -521,7 +521,7 @@ class Facts:
         graph for each call (seconds on a very large module)."""
         import nwn_analysis
         g = nwn_analysis.Graph(self.db)
-        live = g.live(nwn_analysis.server_config_values(self.dir)[1])
+        live = g.live(nwn_analysis.server_config_values(self.dir)[1], nwn_analysis.database_words(self.dir))
         out = [dict(node=nd, label=self.label(nd), detail=g.impact(nd, detail=True, live=live))
                for nd in self._nodes_for(name)[:10]]
         return dict(name=name, impact=out)

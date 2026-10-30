@@ -76,8 +76,8 @@ def checks(tmp):
           len(nl) == 1 and nl[0]["severity"] == "info" and nl[0]["node"] == "2da:cls_feat_psi"
           and "row 1" in nl[0]["detail"] and "Psion" in nl[0]["detail"] and "classes.hak" in nl[0]["detail"], nl)
     ms = by(rep, "class_feat_missing")
-    check("missing: a feat past the end of feat.2da and a blank (deleted) feat row are one warning naming both rows",
-          len(ms) == 1 and ms[0]["severity"] == "warning" and "row 2 (feat 99: feat.2da has 5 rows)" in ms[0]["detail"]
+    check("missing: a feat past the end of feat.2da and a blank (deleted) feat row are one ERROR naming both rows",
+          len(ms) == 1 and ms[0]["severity"] == "error" and "row 2 (feat 99: feat.2da has 5 rows)" in ms[0]["detail"]
           and "radial menu" in ms[0]["detail"]
           and "row 3 (feat 2 is a blank row in feat.2da - deleted)" in ms[0]["detail"], ms)
     nn = by(rep, "class_feat_no_name")
