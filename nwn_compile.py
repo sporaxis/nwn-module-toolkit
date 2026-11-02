@@ -9,7 +9,8 @@ The toolkit's own checks (nwn_index.validate) find structural problems, but only
 a script compiles against the game's nwscript.nss and includes. This module runs that compiler and turns its log
 into a per-script list of errors.
 
-Finding the compiler: --compiler (or the Settings path) when given - then only that file; otherwise env
+Finding the compiler: --compiler (or the Settings path) when given - then only that file, or, for a folder (the
+unzipped neverwinter.nim release), the compiler inside it (two levels down at most); otherwise env
 NWN_SCRIPT_COMP, ./tools/, PATH. The file must be executable (nwn_script_comp.exe on Windows).
 Finding the game (for nwscript.nss and base-game includes): --nwn-root, env NWN_ROOT,
 or the compiler's own auto-detection of your Steam/Beamdog install.
@@ -56,19 +57,61 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 LINE_RE = re.compile(r"\]\s+(?P<path>(?:[A-Za-z]:)?[^:]+?\.nss):\s*(?P<msg>.*?)(?:\s+\[[<\d.]+ms\])?$")
 
 
+RELEASES_URL = "https://github.com/niv/neverwinter.nim/releases"
+EXE = "nwn_script_comp.exe" if os.name == "nt" else "nwn_script_comp"
+
+
+FOLDER_CAP = 2000      # entries listed at most when Settings names a folder (a whole drive picked by mistake)
+
+
+def _search_folder(folder):
+    """(path of the compiler or None, True when the search stopped at FOLDER_CAP entries) for a folder the user chose
+    (the unzipped neverwinter.nim release, say): the folder itself, then one or two levels down (releases have put
+    the programs in the top folder and in bin/). The first match by name, case-insensitive, sorted so the answer is
+    the same every time. Only lists folders, never follows a link out of the folder. Never raises."""
+    seen = 0
+    level = [folder]
+    for _depth in range(3):
+        nxt = []
+        for d in level:
+            try:
+                names = sorted(os.listdir(d))
+            except OSError:
+                continue
+            for nm in names:
+                seen += 1
+                if seen > FOLDER_CAP:
+                    return None, True
+                full = os.path.join(d, nm)
+                if os.path.islink(full):
+                    continue
+                if nm.lower() == EXE and os.path.isfile(full):
+                    return full, False
+                if os.path.isdir(full):
+                    nxt.append(full)
+        level = nxt
+    return None, False
+
+
+def _in_folder(folder):
+    """The compiler inside a folder the user chose, or None (see _search_folder)."""
+    return _search_folder(folder)[0]
+
+
 def _candidates(explicit):
     """Where the compiler may be, in search order (see find_compiler). An explicit path is the only candidate:
-    the caller asked for that program, so another one found elsewhere must not be used in its place."""
+    the caller asked for that program, so another one found elsewhere must not be used in its place. An explicit
+    FOLDER is looked into (_in_folder): people often pick the unzipped neverwinter.nim folder, not the program."""
     if explicit:
-        return [explicit]
-    exe = "nwn_script_comp.exe" if os.name == "nt" else "nwn_script_comp"
-    return [os.environ.get("NWN_SCRIPT_COMP"), os.path.join(HERE, "tools", exe), shutil.which("nwn_script_comp")]
+        return [_in_folder(explicit) if os.path.isdir(explicit) else explicit]
+    return [os.environ.get("NWN_SCRIPT_COMP"), os.path.join(HERE, "tools", EXE), shutil.which("nwn_script_comp")]
 
 
 def find_compiler(explicit=None):
     """Path of nwn_script_comp, or None. explicit: a path from the settings or the command line - when given, only
-    that file is accepted (None if it is missing). Otherwise tried in order: env NWN_SCRIPT_COMP, the toolkit's
-    tools/ folder, PATH. The file must exist and be executable; it is never run here."""
+    that file, or the compiler inside that folder (_search_folder), is accepted (None if there is none). Otherwise
+    tried in order: env NWN_SCRIPT_COMP, the toolkit's tools/ folder, PATH. The file must exist and be executable;
+    it is never run here."""
     for c in _candidates(explicit):
         if c and os.path.isfile(c) and os.access(c, os.X_OK):
             return c
@@ -87,10 +130,22 @@ def not_found_reason(explicit=None):
     for c in _candidates(explicit):
         if c and os.path.isfile(c):
             return f"{c} is not executable - run: {_run_hint(c)}"
+    if explicit and os.path.isdir(explicit):
+        if _search_folder(explicit)[1]:
+            return (f"the folder set in Settings ({explicit}) holds too many files to search (stopped after "
+                    f"{FOLDER_CAP:,}) - point Settings at the unzipped neverwinter.nim folder itself. " + HOW_TO_GET)
+        return (f"the folder set in Settings ({explicit}) has no {EXE} in it. " + HOW_TO_GET)
     if explicit:
-        return f"the compiler set in Settings does not exist: {explicit}"
-    return ("Official compiler (nwn_script_comp) not found. Download neverwinter.nim from GitHub releases and put "
-            "nwn_script_comp (nwn_script_comp.exe on Windows) in the toolkit's tools/ folder.")
+        return f"the compiler set in Settings is not there any more: {explicit}. " + HOW_TO_GET
+    return f"The official script compiler ({EXE}) was not found. " + HOW_TO_GET
+
+
+# What to do when there is no compiler - shown wherever validation is skipped. Plain steps for a non-programmer.
+HOW_TO_GET = (f"To get it: open {RELEASES_URL}, download the zip for your system from the newest release (Windows: "
+              "the one with 'windows' in its name; macOS: 'macos'; Linux: 'linux'), unzip it, and either copy "
+              f"{EXE} into the toolkit's tools folder or set Settings > Script compiler to the unzipped folder (or to "
+              f"{EXE} itself). It is free and needs no install. Without it everything else still works: the analysis "
+              "still checks the compiled scripts (.ncs) it finds; only this compile check is skipped.")
 
 
 def _died_reason(comp, returncode, log):

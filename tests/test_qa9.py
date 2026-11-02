@@ -924,6 +924,71 @@ def test_ncs_precedence(tmp):
           "byte cp1252 leaves undefined is not called stale", not issues and stats["compared"] == 2, (issues, stats))
 
 
+def test_ncs_testers_1_5_8(tmp):
+    """A tester's 128 stale scripts (2026-11-02): (1) a \\xNN escape is one cp1252 byte in the compiled text (a colour
+    table "\\x20\\x8E\\xFF"), and (2) a base-game include's own #includes are followed (x0_i0_anims -> ... ->
+    x0_i0_campaign's "nw_campaign_db_default"). Also (3): a library that builds "void main() {...}" in a string for
+    ExecuteScriptChunk is still an include, so no not_compiled warning."""
+    import sqlite3
+    import contextlib
+    import io
+    import nwn_index
+    import nwn_ncs
+    check("compiled scripts: \\x8E in source is the byte the compiled text holds (Z with caron), not chr(0x8E)",
+          nwn_ncs._unescape(r"\x20\x39\x8E\xFF") == n.decode_text(b"\x20\x39\x8e\xff"), nwn_ncs._unescape(r"\x8E"))
+    game = os.path.join(tmp, "game158")
+    n.write_key_bif(game, {("inc_top", "nss"): b'#include "inc_deep"\n// #include "inc_gone"\nint T = 1;',
+                           ("inc_deep", "nss"): b'string DB = "nw_campaign_db_default";'})
+    mdir = os.path.join(tmp, "ncs158")
+    os.makedirs(mdir)
+    colours = b"\x20\x39\x8e\xff"
+    body = b"".join(b"\x04\x05" + struct.pack(">H", len(t)) + t for t in (b"nw_campaign_db_default", colours))
+    with open(os.path.join(mdir, "user.ncs"), "wb") as fh:
+        fh.write(_ncs(body + b"\x20\x00"))
+    db = sqlite3.connect(":memory:")
+    db.executescript("CREATE TABLE sources(id INTEGER PRIMARY KEY, path TEXT, kind TEXT, priority INTEGER);"
+                     "CREATE TABLE files(id INTEGER PRIMARY KEY, source_id INTEGER, relpath TEXT, ext TEXT);"
+                     "CREATE TABLE scripts(file_id INTEGER, name TEXT, source TEXT);"
+                     "CREATE TABLE edges(src TEXT, dst TEXT, kind TEXT, via TEXT);")
+    db.execute("INSERT INTO sources VALUES (1, ?, 'module', 0)", (mdir,))
+    fid = db.execute("INSERT INTO files(source_id, relpath, ext) VALUES (1, 'user.nss', 'nss')").lastrowid
+    db.execute("INSERT INTO scripts VALUES (?,?,?)", (fid, "user", '#include "inc_top"\nvoid main() { string c = '
+                                                                   '"\\x20\\x39\\x8E\\xFF"; }'))
+    db.execute("INSERT INTO files(source_id, relpath, ext) VALUES (1, 'user.ncs', 'ncs')")
+    db.execute("INSERT INTO edges VALUES ('script:user', 'script:inc_top', 'include', '')")
+    issues, stats = nwn_ncs.check_module(db, nwn_root=game, live={"script:user"})
+    check("compiled scripts: text from an include two levels into the base game, and a \\x colour table, are not stale",
+          not issues and stats["compared"] == 1, (issues, stats))
+    # 3 an include that writes "void main() {" inside a string literal
+    mod = os.path.join(tmp, "nui158")
+    os.makedirs(mod)
+    with open(os.path.join(mod, "lib_chunk.nss"), "w") as fh:
+        fh.write('int RunIt(string sFn)\n{\n    string s = "#" + "include x " + "void main() {" + sFn + "();}";\n'
+                 '    return ExecuteScriptChunk(s, OBJECT_SELF, FALSE) == "";\n}\n')
+    with open(os.path.join(mod, "module.ifo"), "wb") as fh:
+        fh.write(n.write_gff(root("IFO ", Mod_Name=loc("c"), Mod_Entry_Area=(R, "a1"), Mod_Area_list=(LST, []))))
+    with contextlib.redirect_stdout(io.StringIO()):
+        nwn_index.run_index(mod, out=os.path.join(tmp, "nui158_an"), write_json=False, verbose=False)
+    db = sqlite3.connect(os.path.join(tmp, "nui158_an", "index.sqlite"))
+    row = db.execute("SELECT has_main, has_sc FROM scripts WHERE name='lib_chunk'").fetchone()
+    nc = db.execute("SELECT COUNT(*) FROM issues WHERE category='not_compiled'").fetchone()[0]
+    check("scripts: \"void main() {\" inside a string doesn't make a library runnable - no not_compiled warning",
+          row == (0, 0) and nc == 0, (row, nc))
+    import nwn_build
+    lib2 = '#include "x_inc" // this library has no void main() of its own\nint F() { return 1; }\n'
+    check("scripts: a comment after #include is a comment (\"// no void main()\" doesn't make an include runnable)",
+          not nwn_build._RUNNABLE.search(nwn_build._no_comments(lib2))
+          and nwn_index.lex_nss(lib2)[1] == [(1, "x_inc")], nwn_build._no_comments(lib2))
+    code3, inc3, _l3 = nwn_index.lex_nss('#define X "/*"\nvoid main() { }\n')
+    check("scripts: a /* inside quotes on a #define line is not a comment (the main() after it still counts)",
+          "void main()" in code3, code3)
+    t0 = time.time()
+    nwn_build._no_comments('void main() { string s = "' + '\\"' * 40000 + "\n")
+    h.timing("build: the include test is linear (a line of 40,000 escaped quotes)", time.time() - t0, 1.0)
+    check("build: the same library counts as an include (not compiled on its own)",
+          not nwn_build._RUNNABLE.search(nwn_build._no_comments(open(os.path.join(mod, "lib_chunk.nss")).read())))
+
+
 def test_untrusted_input(tmp):
     """Hostile or odd input stays contained: links in a folder module are not followed, a deep GFF is a GffError,
     an ERF entry larger than the file is refused before reading, odd table names in an uploaded database don't
@@ -1152,7 +1217,7 @@ def main():
             h.run(test_db_upload, out)
             h.run(test_ncs_dashboard, out)
         for fn in (test_hostile, test_database, test_logs, test_editor_haks, test_include_recompile, test_heartbeats,
-                   test_rmtree_force, test_compressed_erf, test_ncs, test_ncs_precedence, test_untrusted_input,
+                   test_rmtree_force, test_compressed_erf, test_ncs, test_ncs_precedence, test_ncs_testers_1_5_8, test_untrusted_input,
                    test_lean_hak_guard, test_housekeep, test_hak_editor):
             h.run(fn, tmp)
         h.run(test_dashboard_static)

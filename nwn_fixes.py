@@ -231,6 +231,10 @@ FIXES = {
     "hak_not_loaded": _hak_not_loaded,
     "tlk_not_found": lambda i: ("Copy the custom .tlk into Documents/Neverwinter Nights/tlk (or set the NWN user "
                                 "folder in Settings) and re-analyse, so names stored as talk-table numbers can be checked."),
+    "tlk_inside_module": lambda i: ("Start the module in game with the .tlk removed from Documents/Neverwinter "
+                                    "Nights/tlk and look at a custom item, feat or class name. If the names show, the "
+                                    "packed copy works: accept this as by design. If they are blank or numbers, put "
+                                    "the .tlk back in the tlk folder and send it to players and builders with the haks."),
     "base_game_not_found": lambda i: ("Settings > NWN install folder: choose the folder that contains 'data' (e.g. "
                                       ".../Beamdog Library/00785), then re-analyse."),
     "toolset_unsaved": lambda i: ("Save the module in the toolset (File > Save), close it, then analyse again - the "
@@ -253,6 +257,12 @@ FIXES = {
     "resource_conflict": lambda i: ("Several sources provide this resource - the game uses the first in load order "
                                     "(first-listed hak > module > your override folder > base game). Keep one, or "
                                     "make sure the winner is the one you want."),
+    "locstring_both": lambda i: ("Only matters if some players use a different game language from the toolset's. "
+                                 "Where the text is the same as the talk-table line, remove the text and keep the "
+                                 "number (every language then shows its own translation); where it differs, set the "
+                                 "number to -1 (none) so everyone sees your text. Do it in a GFF editor, or in the "
+                                 "toolset's localised-string editor (the ... button beside the field). If all your "
+                                 "players share one language, accept this as by design."),
     "broken_strref": lambda i: ("Type the text into the field in the toolset (so it no longer depends on the talk "
                                 "table), or add the string to the custom .tlk."),
     "resref_case": lambda i: ("Rename the blueprint to lower case (Find & replace, file name), or compare with "

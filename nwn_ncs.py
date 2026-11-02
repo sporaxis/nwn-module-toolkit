@@ -157,9 +157,15 @@ _DATE_MARK, _TIME_MARK = "\0D", "\0T"                    # placeholders: can't o
 
 
 def _unescape(s):
-    r"""Turn a literal as written in source ("a\nb", "\x41") into the text the compiler stores."""
+    r"""Turn a literal as written in source ("a\nb", "\x41") into the text the compiler stores.
+
+    A \xNN escape is one BYTE in the compiled script, and compiled text is read with nwnlib.decode_text (cp1252), so
+    the byte is decoded the same way: \x8E is "Ž", not the control character chr(0x8E). Colour-token tables are
+    written like this ("\x20\x39\x8E\xFF" - a tester's module), and decoding them differently made the script look
+    stale."""
     return re.sub(r"\\(x[0-9a-fA-F]{2}|.)",
-                  lambda m: chr(int(m.group(1)[1:], 16)) if m.group(1)[0] == "x" else _ESC.get(m.group(1), m.group(1)),
+                  lambda m: (nwnlib.decode_text(bytes([int(m.group(1)[1:], 16)])) if m.group(1)[0] == "x"
+                             else _ESC.get(m.group(1), m.group(1))),
                   s)
 
 
@@ -188,6 +194,20 @@ def _explained(s, lits, memo):
                     reach[i + ln] = True
     memo[s] = reach[len(s)]
     return memo[s]
+
+
+_INCLUDE = re.compile(r'^[ \t]*#include[ \t]+"([^"\n]+)"', re.M)
+_STR_OR_COMMENT = re.compile(r'"(?:\\.|[^"\\\n])*"|//[^\n]*|/\*.*?\*/', re.S)
+
+
+def _includes_in(text):
+    """Names (lower case, no .nss) a source file #includes, with commented-out lines ignored; [] for None. Used for
+    files the index never read (base-game includes), whose #include lines are not in its edges. Never raises."""
+    if not text:
+        return []
+    bare = _STR_OR_COMMENT.sub(lambda m: m.group(0) if m.group(0)[0] == '"' else " ", text)
+    return [x.strip().lower()[:-4] if x.strip().lower().endswith(".nss") else x.strip().lower()
+            for x in _INCLUDE.findall(bare)]
 
 
 def _file_literals(name, text):
@@ -269,6 +289,7 @@ def check_module(db, module_path=None, nwscript_text="", nwn_root=None, live=Non
                                 "JOIN sources s ON s.id=f.source_id WHERE sc.source IS NOT NULL "
                                 f"ORDER BY {n.source_rank_sql()}, s.id"):
         sources.setdefault(name.lower(), src)
+    indexed = set(sources)                                 # scripts the index read (their #includes are edges)
     includes = {}                                          # script -> scripts it #includes directly
     for src, dst in db.execute("SELECT src, dst FROM edges WHERE kind='include'"):
         if src.startswith("script:") and dst.startswith("script:"):
@@ -327,13 +348,19 @@ def check_module(db, module_path=None, nwscript_text="", nwn_root=None, live=Non
             if sources.get(name) is None:
                 continue                                  # compiled only: there is no source to compare with
 
-            # The script plus everything it includes, directly or through other includes.
+            # The script plus everything it includes, directly or through other includes. The index only knows the
+            # #include lines of files it read (module, haks, override); a base-game include (x0_i0_anims...) is read
+            # from the game here, so ITS #include lines are taken from its text - otherwise literals two levels down
+            # (x0_i0_campaign's "nw_campaign_db_default") were missing and the script looked stale (a tester's 128).
             closure, todo = set(), [name]
             while todo:
                 x = todo.pop()
                 if x not in closure:
                     closure.add(x)
-                    todo.extend(includes.get(x, ()))
+                    if x in includes:
+                        todo.extend(includes[x])
+                    elif x not in indexed:
+                        todo.extend(_includes_in(source_of(x)))
             texts = {x: source_of(x) for x in closure}
             if any(t is None for t in texts.values()):
                 stats["not_compared"] += 1

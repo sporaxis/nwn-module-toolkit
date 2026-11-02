@@ -1199,8 +1199,9 @@ class Tlk:
         return self.entry(strref - CUSTOM_TLK_BIT if strref >= CUSTOM_TLK_BIT else strref)
 
     def entries(self):
-        """Yield (index, text) for every entry that has text."""
-        for i in range(self.count):
+        """Yield (index, text) for every entry that has text. Bounded by the entries the file can really hold (as
+        sounds() is): a header claiming 4 billion entries must not make a page walk them all."""
+        for i in range(min(self.count, max(0, (len(self.data) - 20) // 40))):
             if self.has(i):
                 yield i, self.entry(i)
 

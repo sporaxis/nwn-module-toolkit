@@ -101,6 +101,9 @@ SQLite schema (index.sqlite)
                               every localised string that points into a talk table. custom: 1 for the custom .tlk
                               (strref >= 0x01000000). has_text: the file also carries its own text. status: from
                               nwnlib.TlkSet.status ('ok', 'custom-missing', 'no-custom-tlk', 'base-missing'...).
+    locstrings(file_id, path, strref, same, text, tlk_text)
+                              localised strings with BOTH a talk-table number and text in that table's language
+                              (locstring_both): same=1 when the text equals the talk-table line
     nodes(node, type, name, label, file_id, in_module)
                               the graph's nodes. in_module = 1 when the thing exists in a loaded source (module, hak or
                               override); 0 for a reference to something that was not found (may be base game).
@@ -196,6 +199,7 @@ CREATE TABLE twoda(file_id INTEGER, name TEXT, row TEXT, col TEXT, value TEXT, l
 CREATE TABLE models(file_id INTEGER, name TEXT, format TEXT, supermodel TEXT, textures TEXT);
 CREATE TABLE equips(owner TEXT, item TEXT, slot INTEGER, full_copy INTEGER);
 CREATE TABLE strrefs(file_id INTEGER, path TEXT, strref INTEGER, custom INTEGER, has_text INTEGER, status TEXT);
+CREATE TABLE locstrings(file_id INTEGER, path TEXT, strref INTEGER, same INTEGER, text TEXT, tlk_text TEXT);
 CREATE TABLE nodes(node TEXT PRIMARY KEY, type TEXT, name TEXT, label TEXT,
     file_id INTEGER, in_module INTEGER);
 CREATE TABLE edges(src TEXT, dst TEXT, kind TEXT, via TEXT);
@@ -337,6 +341,53 @@ def sha256(b: bytes) -> str:
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
+# a "..." string literal in comment-free NWScript (lex_nss output): escapes \" and \\ included, never across a line
+STRING_LIT_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"')
+
+
+def _plain(t):
+    """Text as the player reads it, for comparing an embedded string with a talk-table line: line ends unified and
+    white space at the ends ignored (the toolset and tlk editors differ on both)."""
+    return t.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def locstring_both(value, tlk):
+    """(same, text, tlk_text) for a localised string that holds BOTH a talk-table number and its own text in the
+    talk table's language, when that matters to players; else None.
+
+    Why it matters (nwn-issues #370, a tester's report): the game shows the embedded text to players whose language
+    has one, and the talk-table line to everyone else - so a name edited in an English toolset reaches English
+    players only, while others see the original (or the other way round). same=1: the embedded text equals the
+    talk-table line, so it adds nothing - remove it and every language gets its own translation. same=0: the text was
+    changed on purpose - set the number to -1 (none) so every player sees that text.
+
+    Judged only on what can be judged: the talk-table line must exist (a missing one is broken_strref's business) and
+    the string must have a male/neutral text (key language*2) in the table's language. A female text (language*2+1)
+    that differs from the male one is a deliberate gendered text (the game's female lines live in dialogF.tlk, not
+    read here): not judged. A CUSTOM talk-table number whose text equals its line is not reported (None): the custom
+    .tlk has one language, so every player already sees the same words, and the embedded text is what shows when a
+    player's game can't load the custom .tlk - removing it would only lose that fallback (an independent review).
+    value: an nwnlib.LocString. tlk: the nwnlib.TlkSet in use. Never raises."""
+    try:
+        if value.strref == n.BAD_STRREF or tlk.status(value.strref) != "ok":
+            return None
+        custom = value.strref >= n.CUSTOM_TLK_BIT
+        table = tlk.custom if custom else tlk.base
+        lang = getattr(table, "language", 0) or 0
+        if lang < 0 or lang > 0x7FFFFFFF:
+            return None
+        male, female = value.entries.get(lang * 2) or "", value.entries.get(lang * 2 + 1) or ""
+        if not male or (female and _plain(female) != _plain(male)):
+            return None
+        line = tlk.get(value.strref)
+        same = _plain(male) == _plain(line)
+        if same and custom:
+            return None
+        return int(same), male[:200], line[:200]
+    except Exception:  # noqa - an odd value is simply not judged
+        return None
+
+
 def lex_nss(src: str):
     """Returns (code_without_comments, includes, literals[(line, func, literal, concatenated)]).
 
@@ -374,8 +425,20 @@ def lex_nss(src: str):
             m = re.match(r'#\s*include\s+"([^"]+)"', directive)    # #include "x0_i0_spells" -> x0_i0_spells
             if m:
                 includes.append((line, m.group(1).lower()))
-            out.append(directive)
-            i = L if j < 0 else j
+            # a comment after the directive is a comment (#include "x" // no main() here), not code: the directive
+            # ends where it starts, and the normal scan takes it from there (also a /* that runs on to later lines)
+            # (outside "..." only: #define X "//" keeps its text)
+            cut, k, quoted = len(directive), m.end() if m else 1, False
+            while k < len(directive):
+                ch2 = directive[k]
+                if ch2 == '"':
+                    quoted = not quoted
+                elif not quoted and directive.startswith(("//", "/*"), k):
+                    cut = k
+                    break
+                k += 1
+            out.append(directive[:cut])
+            i += cut
             continue
         if c == '"':
             # a string ends at the closing quote or, if unclosed, at the end of the line; escapes (\" \n) are kept
@@ -561,6 +624,7 @@ class Indexer:
         self.budget = None            # (deadline, state_path) when running in time-boxed chunks
         self.tlk = tlk_path if isinstance(tlk_path, n.TlkSet) else n.TlkSet(custom=n.Tlk(tlk_path) if tlk_path else None)
         self.strref_rows = []
+        self.locstr_rows = []       # localised strings holding both a talk-table number and text (locstring_both)
         self.nodes: Dict[str, dict] = {}
         self.edges: List[Tuple[str, str, str, str]] = []
         self.field_rows = []
@@ -767,8 +831,9 @@ class Indexer:
     # JSON has no sets and no tuple dictionary keys: these are written as sorted lists (obj_types as [key, value]
     # pairs) and rebuilt by load_state. Tuples come back as lists, which every reader of these attributes accepts.
     STATE_SETS = ("base_names", "concat_keys", "tagbased_prefixes", "glued_idents", "tag_mod", "prefix_mod")
-    STATE_FORMAT = "nwn_index checkpoint 4"      # 1 was a pickle (it could run code from the file; never read now);
-    #                                               2 had no ov column in tokens, 3 four-part pending literals (1.5.7)
+    STATE_FORMAT = "nwn_index checkpoint 5"      # 1 was a pickle (it could run code from the file; never read now);
+    #                                               2 had no ov column in tokens, 3 four-part pending literals (1.5.7),
+    #                                               4 no locstrings table (1.5.8)
 
     def save_state(self, state_path, progress):
         """Write a checkpoint: flush buffered rows, commit, and write the in-memory state to state_path as JSON.
@@ -832,7 +897,7 @@ class Indexer:
                                                    "AND node NOT IN (SELECT node FROM files WHERE id <= ? AND node IS NOT NULL)",
                                                    (max_file_id, max_file_id))]
             self.log(f"  resume: dropping {len(fids)} file row(s) left by an interrupted step")
-            for tbl in ("fields", "strrefs", "objects", "scripts", "conversations", "twoda", "models"):
+            for tbl in ("fields", "strrefs", "locstrings", "objects", "scripts", "conversations", "twoda", "models"):
                 self.db.execute(f"DELETE FROM {tbl} WHERE file_id > ?", (max_file_id,))
             # quest entries are keyed by tag and equips by the owner's node: only keys no surviving file shares are
             # cleared (a shared key would lose the surviving file's rows)
@@ -937,6 +1002,9 @@ class Indexer:
                 # 0xFFFFFFFF = "no talk-table entry"; a number at or above 0x01000000 points into the custom .tlk
                 self.strref_rows.append((fid, path, value.strref, int(value.strref >= n.CUSTOM_TLK_BIT),
                                          int(any(t for t in value.entries.values())), self.tlk.status(value.strref)))
+                both = locstring_both(value, self.tlk)
+                if both:
+                    self.locstr_rows.append((fid, path, value.strref) + both)
             if ext == "ifo" and label in IFO_NOT_NAMES:
                 continue    # hak and talk-table names: not mentions of files (a hak's own readme can share its name)
             if (ftype == n.RESREF or (ftype == n.CEXOSTRING and not re.search(r"\s", value))) and value:
@@ -963,6 +1031,8 @@ class Indexer:
         self.field_rows = []
         self.db.executemany("INSERT INTO strrefs VALUES (?,?,?,?,?,?)", self.strref_rows)
         self.strref_rows = []
+        self.db.executemany("INSERT INTO locstrings VALUES (?,?,?,?,?,?)", self.locstr_rows)
+        self.locstr_rows = []
         self.db.executemany("INSERT INTO tokens VALUES (?,?,?)", self.token_rows)
         self.token_rows = []
 
@@ -1296,8 +1366,11 @@ class Indexer:
         code, includes, literals = lex_nss(src)
         # the engine runs main() for event/action scripts and StartingConditional() for dialogue conditions;
         # a script with neither is an include library
-        has_main = bool(re.search(r"\bvoid\s+main\s*\(", code))
-        has_sc = bool(re.search(r"\bint\s+StartingConditional\s*\(", code))
+        # looked for outside string literals: a library that builds a script chunk ("void main() {" + ... for
+        # ExecuteScriptChunk, as the NUI framework's nui_i_main does) is still an include (a tester's report)
+        bare = STRING_LIT_RE.sub('""', code)
+        has_main = bool(re.search(r"\bvoid\s+main\s*\(", bare))
+        has_sc = bool(re.search(r"\bint\s+StartingConditional\s*\(", bare))
         norm = normalise_code(code)
         nh = sha256(norm.encode())
         self.db.execute("UPDATE files SET content_hash=? WHERE id=?", (nh, fid))
@@ -2081,14 +2154,59 @@ def locate_custom_tlk(custom_name, nwn_root=None, nwn_user=None):
     return None
 
 
-def find_tlks(custom_name, explicit=None, nwn_root=None, nwn_user=None):
+TLK_INSIDE = "tlk_from_module"   # <analysis>/: a copy of a custom tlk found only inside the module or a hak
+
+
+def custom_tlk_inside(custom_name, module_path, hak_paths=()):
+    """A custom tlk packed inside the module's haks or the module itself, as (where, bytes), or None.
+
+    Some builders pack <Mod_CustomTlk>.tlk into the .mod or a hak so it travels with the module. The tlk folder is
+    where the game is documented to read it (nwn.wiki "TLK": a tlk in a hak "won't be recognized"), so the caller
+    reports where the copy was found and asks for a check in game. Searched in load order (nwnlib.source_rank):
+    haks in module.ifo order, then the module (a folder or a .mod). where: "hak:<name>" or "module". Read-only;
+    never raises (an unreadable hak or module is skipped - the index reports it when it reads that source)."""
+    if not custom_name:
+        return None
+    want = f"{custom_name.lower()}.tlk"
+    for kind, path in [("hak", h) for h in hak_paths] + [("module", module_path)]:
+        if not path:
+            continue
+        try:
+            if os.path.isdir(path):
+                # the same walk the index uses (subfolders too, hidden folders and links skipped), so the quick scan,
+                # the index and this search agree on what the module folder holds; the first match in walk order
+                for full, _rel in n.walk_folder(path):
+                    if os.path.basename(full).lower() == want and os.path.isfile(full):
+                        with open(full, "rb") as fh:
+                            return "module" if kind == "module" else f"hak:{os.path.basename(path)}", fh.read()
+                continue
+            erf = n.Erf(path)
+            try:
+                e = next((e for e in erf.entries if e.filename == want), None)
+                if e:
+                    label = "module" if kind == "module" else \
+                        "hak:" + os.path.splitext(os.path.basename(path))[0].lower()
+                    return label, erf.read(e)
+            finally:
+                erf.close()      # an open handle would lock the .mod/.hak on Windows
+        except Exception:  # noqa - best effort: the source itself is read (and any damage reported) by the index
+            continue
+    return None
+
+
+def find_tlks(custom_name, explicit=None, nwn_root=None, nwn_user=None, module_path=None, hak_paths=(), out=None):
     """Locate dialog.tlk (base) and the module's custom tlk. Returns (TlkSet, info dict).
 
     custom_name: Mod_CustomTlk from module.ifo (no extension). explicit: a custom .tlk path given by the user,
-    used instead of searching. info: base / custom (paths or None), custom_name, custom_missing (True when the
-    module names a custom tlk that was not found). A base candidate that is not a TLK file is skipped; a custom
-    file that is not one raises ValueError. Read-only."""
-    info = dict(base=None, custom=None, custom_name=custom_name or "", custom_missing=False)
+    used instead of searching. module_path / hak_paths / out: when the custom tlk is in no tlk folder, it is looked
+    for inside the haks and the module (custom_tlk_inside); a copy found there is written to <out>/tlk_from_module/
+    (the module and haks are only read) and used, and info custom_inside names where it was ("module" or
+    "hak:<name>"). info: base / custom (paths or None), custom_name, custom_inside, custom_missing (True when the
+    module names a custom tlk that was found nowhere, or found damaged), custom_damaged (that file's path). A base
+    candidate that is not a TLK file is skipped; a damaged custom file is reported, never raised. Writes only inside
+    `out`."""
+    info = dict(base=None, custom=None, custom_name=custom_name or "", custom_missing=False, custom_inside="",
+                custom_damaged="")
     base = None
     for cand in base_tlk_candidates(nwn_root):
         if os.path.isfile(cand):
@@ -2097,14 +2215,49 @@ def find_tlks(custom_name, explicit=None, nwn_root=None, nwn_user=None):
             except ValueError:
                 pass
     custom = None
+    if explicit and os.path.basename(os.path.dirname(os.path.abspath(explicit))) == TLK_INSIDE:
+        explicit = None      # an earlier run's copy of a packed tlk (Analyse again passes meta 'tlk'): search afresh,
+        #                      so a tlk since moved to the tlk folder, changed or removed from the module is seen
     if explicit and os.path.isfile(explicit):
-        custom = n.Tlk(explicit); info["custom"] = explicit
+        try:
+            custom = n.Tlk(explicit); info["custom"] = explicit
+        except ValueError:
+            info["custom_missing"] = True; info["custom_damaged"] = explicit
     elif custom_name:
         p = locate_custom_tlk(custom_name, nwn_root, nwn_user)
+        inside = None if p else custom_tlk_inside(custom_name, module_path, hak_paths)
         if p:
-            custom = n.Tlk(p); info["custom"] = p
+            try:
+                custom = n.Tlk(p); info["custom"] = p
+            except ValueError:
+                # cut off or not a talk table at all: a finding (tlk_not_found says so), never a crash of the run
+                info["custom_missing"] = True; info["custom_damaged"] = p
+        elif inside and out and inside[1][:4] == b"TLK ":
+            # n.Tlk reads from a path: keep a copy in the analysis folder (a temp name, then a rename, so a
+            # half-written copy is never read). The name is made safe: only the module's own tlk name, lower case.
+            d = os.path.join(out, TLK_INSIDE)
+            os.makedirs(d, exist_ok=True)
+            safe = re.sub(r"[^a-z0-9_\-]", "_", custom_name.lower())[:64] or "custom"
+            p = os.path.join(d, f"{safe}.tlk")
+            tmp = f"{p}.{os.getpid()}.{time.monotonic_ns()}.tmp"
+            try:
+                with open(tmp, "wb") as fh:
+                    fh.write(inside[1])
+                os.replace(tmp, p)
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            try:
+                custom = n.Tlk(p); info["custom"] = p; info["custom_inside"] = inside[0]
+            except ValueError:
+                # "TLK " at the start but cut off (a truncated upload): reported as a copy that is not a talk table,
+                # never a crash of the whole analysis; the copy is not kept
+                os.remove(p)
+                info["custom_missing"] = True; info["custom_inside"] = inside[0]
         else:
             info["custom_missing"] = True
+            if inside:
+                info["custom_inside"] = inside[0]     # found, but not a TLK file (or nowhere to keep a copy)
     return n.TlkSet(base, custom), info
 
 
@@ -2251,16 +2404,15 @@ def run_index(module_path, haks=(), overrides=None, tlk=None, out=None, write_js
             ix_note = f"(progress plan unavailable: {ex})"
             print(ix_note, flush=True)
     nwn_progress.emit(phase="index", done_units=0, done_files=0, source="module.ifo")
-    tlkset, tlk_info = find_tlks(custom_name, tlk, nwn_root, nwn_user)
+    tlkset, tlk_info = find_tlks(custom_name, tlk, nwn_root, nwn_user, module_path,
+                                 _ifo_hak_paths(root_ if custom_name else None, haks, nwn_root, nwn_user), out)
     ix = Indexer(out, tlkset, write_json, verbose)
     ix.log(f"Indexing '{mod_name}' -> {out}")
     if tlk_info["custom"] or tlk_info["base"]:
         ix.log(f"  tlk: base={tlk_info['base'] or 'none'} custom={tlk_info['custom'] or 'none'}")
     for o in overrides:
         ix.log(f"  override folder: {o}  (the haks and the module win over it, as in the game)")
-    if tlk_info["custom_missing"]:
-        ix.issue("error", "tlk_not_found", "module", f"module.ifo names custom talk table '{custom_name}.tlk' but it "
-                 "was not found in the NWN tlk folder - custom names/descriptions cannot be checked")
+    _tlk_issues(ix, custom_name, tlk_info)
     ix.tlk_info = tlk_info
     if time_budget:
         ix.budget = (t0 + time_budget, state_path)
@@ -2297,6 +2449,62 @@ def run_index(module_path, haks=(), overrides=None, tlk=None, out=None, write_js
     return _index_sources(ix, plan, 0, 0, state_path, t0, time_budget, out)
 
 
+def _module_ifo(module_path):
+    """module.ifo of a module folder or .mod as a GFF struct, or None (missing or unreadable). Never raises; the
+    index reports a damaged module.ifo when it reads the module itself."""
+    try:
+        if os.path.isdir(module_path):
+            ifo = os.path.join(module_path, "module.ifo")
+            return n.read_gff_file(ifo) if os.path.isfile(ifo) else None
+        erf_ = n.Erf(module_path)
+        try:
+            e_ = next((e for e in erf_.entries if e.filename == "module.ifo"), None)
+            return n.read_gff(erf_.read(e_)) if e_ else None
+        finally:
+            erf_.close()      # add_source opens the .mod again; an open handle would lock it on Windows
+    except Exception:  # noqa
+        return None
+
+
+def _ifo_hak_paths(root, haks, nwn_root, nwn_user):
+    """The hak files module.ifo lists, found as the index finds them (find_haks), in module.ifo order - where a
+    custom tlk packed into a hak is looked for. [] when root is None. Never raises; reads folder listings only."""
+    if root is None:
+        return []
+    try:
+        names = [h.get("Mod_Hak") for h in (root.get("Mod_HakList", []) or []) if h.get("Mod_Hak")]
+        if root.get("Mod_Hak"):      # the older single field naming one hak, added after the list
+            names.append(root.get("Mod_Hak"))
+        found, _ = find_haks([h.lower() for h in names], haks, default_hak_dirs(nwn_root, nwn_user))
+        return found
+    except Exception:  # noqa
+        return []
+
+
+def _tlk_issues(ix, custom_name, tlk_info):
+    """Issues about the module's custom talk table: not found anywhere (error), found only inside the module or a
+    hak (warning - the game is documented to read it from the tlk folder, so it asks for a check in game), or a
+    copy there that is not a TLK file (error)."""
+    where = tlk_info.get("custom_inside") or ""
+    place = "the module" if where == "module" else (f"the hak '{where[4:]}'" if where else "")
+    if tlk_info.get("custom_damaged"):
+        ix.issue("error", "tlk_not_found", "module", f"the custom talk table {tlk_info['custom_damaged']} is damaged "
+                 "or not a talk table (cut off?) - custom names and descriptions cannot be checked; replace it "
+                 "with a good copy")
+    elif tlk_info.get("custom_missing") and where:
+        ix.issue("error", "tlk_not_found", "module", f"module.ifo names custom talk table '{custom_name}.tlk'; it is "
+                 f"not in the NWN tlk folder, and the copy inside {place} is damaged or not a talk table - custom names and "
+                 "descriptions cannot be checked")
+    elif tlk_info.get("custom_missing"):
+        ix.issue("error", "tlk_not_found", "module", f"module.ifo names custom talk table '{custom_name}.tlk' but it "
+                 "was not found in the NWN tlk folder, the module or its haks - custom names/descriptions cannot be "
+                 "checked")
+    elif where:
+        ix.issue("warning", "tlk_inside_module", "module", f"custom talk table '{custom_name}.tlk' is packed inside "
+                 f"{place} and is not in the NWN tlk folder - names were read from that copy. The game is documented "
+                 "to read a custom tlk from the tlk folder only, so check in game that custom names show")
+
+
 def _plan_after_module(ix, haks, overrides, nwn_root, nwn_user, tlk_info):
     """Once the module itself is indexed: find its haks, record the settings in meta, read the base game's resource
     names, and return the plan of the sources still to load. Used by the fresh run and by a resumed run whose
@@ -2319,6 +2527,7 @@ def _plan_after_module(ix, haks, overrides, nwn_root, nwn_user, tlk_info):
     ix.db.execute("INSERT OR REPLACE INTO meta VALUES ('nwn_user', ?)", (nwn_user or "",))
     ix.db.execute("INSERT OR REPLACE INTO meta VALUES ('tlk', ?)", (tlk_info.get("custom") or "",))
     ix.db.execute("INSERT OR REPLACE INTO meta VALUES ('tlk_base', ?)", (tlk_info.get("base") or "",))
+    ix.db.execute("INSERT OR REPLACE INTO meta VALUES ('tlk_inside', ?)", (tlk_info.get("custom_inside") or "",))
     for h in missing:
         ix.issue("error", "hak_not_loaded", f"hak:{h}",
                  f"module.ifo uses hak '{h}.hak' but it was not found/loaded - anything it provides (2das, "
@@ -2384,7 +2593,9 @@ def _resume_index(module_path, haks, overrides, tlk, out, write_json, verbose, n
         db.close()
     except Exception:  # noqa
         pass
-    tlkset, tlk_info = find_tlks(custom_name, tlk, nwn_root, nwn_user)
+    tlkset, tlk_info = find_tlks(custom_name, tlk, nwn_root, nwn_user, module_path,
+                                 _ifo_hak_paths(_module_ifo(module_path) if custom_name else None, haks, nwn_root,
+                                                nwn_user), out)
     ix = Indexer(out, tlkset, write_json, verbose, resume=True)
     progress = ix.load_state(state_path)
     ix.tlk_info = ix.tlk_info or tlk_info

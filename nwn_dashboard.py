@@ -457,7 +457,7 @@ DATA_FILES = ("index.sqlite", "index.sqlite-journal", "index.sqlite-wal", "index
               "index.state.tmp", "index.done", "report.json", "catalog.json", "compile.json", "palette.json",
               "palette.json.tmp", INCOMPLETE,
               nwn_progress.RUN_LOCK, "analysis_archive.zip", "analysis_archive.zip.tmp", "archive.json")
-DATA_DIRS = ("json", "conversations", "reports", ".unpack_tmp", "maps", "maps.tmp", "maps.old")
+DATA_DIRS = ("json", "conversations", "reports", ".unpack_tmp", "maps", "maps.tmp", "maps.old", nwn_index.TLK_INSIDE)
 # Your own work: only deleted when you tick it (and type the analysis name).
 USER_PARTS = {"edits": ("edits", "palette_moves.json", "blueprint_changes.json"), "build": ("build",),
               "descriptions": ("descriptions.json", "batches", "accepted_issues.json", "server_config.json",
@@ -1895,7 +1895,7 @@ def compile_one(analysis, relpath):
     s = settings()
     comp = nwn_compile.find_compiler(s["compiler"] or None)
     if not comp:
-        return dict(status="skipped", reason="official compiler not installed (see Modules page)")
+        return dict(status="skipped", reason=nwn_compile.not_found_reason(s["compiler"] or None))
     g, db = get_graph(name_of(analysis))
     with LOCK:
         rows = db.execute("SELECT name, source FROM scripts").fetchall()
@@ -2348,9 +2348,11 @@ def api_state(q):
     s = settings()
     found = default_nwn_roots()
     analyses = list_analyses()
+    comp = nwn_compile.find_compiler(s["compiler"] or None)     # looked up once per call (a folder is searched)
     setup = nwn_setup.state(HERE)
     return dict(analyses=analyses, settings=s, workspace=WORKSPACE, jobs=jobs,
-                compiler_found=nwn_compile.find_compiler(s["compiler"] or None),
+                compiler_found=comp,
+                compiler_hint=None if comp else nwn_compile.not_found_reason(s["compiler"] or None),
                 default_logs=nwn_logs.default_log_dirs(), default_nwn_root=found[0] if found else "",
                 version=VERSION, reanalyse=nwn_update.REANALYSE, work_format=nwn_update.WORK_FORMAT,
                 setup=setup,

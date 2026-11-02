@@ -20,6 +20,9 @@ What each check proves (id: FAIL / WARN conditions)
                    and for rewritten GFF files every changed field equals a logged change
     blueprint_changes  (only when the build applied bulk changes) each changed blueprint in the clean module holds
                    its new value; placed copies that followed are covered by "modified" and "placements"
+    locstring_fix  (only when the build applied the localised-text fix) each changed text field kept its talk-table
+                   number, lost only its text in that table's language, and that text was the talk-table line (re-read
+                   from the talk tables the analysis used; WARN when they can't be read)
     palette_moves  (only when the build applied palette moves) each moved blueprint in the clean module holds its new
                    palette number, and where the build moved its palette-file entry, the file lists it there
     edits_compiled edited/new scripts have a fresh .ncs (WARN only: the old compiled code would run)
@@ -167,6 +170,37 @@ def _palette_listing(root):
     return found
 
 
+# issue categories compared by (category, node) only in the "references" check: their wording changed between
+# versions (1.5.9 says where it looked for the talk table), and an original analysed by an older version must not make
+# the same finding look new
+WORDING_ONLY = {"tlk_not_found", "tlk_inside_module"}
+
+
+def _check_log_shape(changes):
+    """Refuse a change log whose shape isn't the one nwn_build writes (a hand-edited or damaged changes.json): a clear
+    ValueError, never a PASS and never a stray TypeError half-way through the checks. Checks the lists the audit
+    walks: their type and that each entry has the keys it reads."""
+    def lst(key, of=None, keys=()):
+        v = changes.get(key, [])
+        if not isinstance(v, list):
+            raise ValueError(f"the build's change log is damaged: '{key}' is not a list - build again")
+        for e in v:
+            if of is not None and not isinstance(e, of):
+                raise ValueError(f"the build's change log is damaged: an entry of '{key}' is {type(e).__name__} - "
+                                 "build again")
+            if keys and not all(k in e for k in keys):
+                raise ValueError(f"the build's change log is damaged: an entry of '{key}' lacks "
+                                 f"{', '.join(k for k in keys if k not in e)} - build again")
+    if not isinstance(changes, dict):
+        raise ValueError("the build's change log is damaged (not a JSON object) - build again")
+    for key in ("edited", "added", "rewritten", "compiled"):
+        lst(key, str)
+    lst("deleted", dict, ("file", "node"))
+    lst("field_changes", dict, ("file", "field", "new"))
+    lst("blueprint_changes", dict, ("type", "resref", "field", "to"))
+    lst("palette_moves", dict, ("type", "resref"))
+
+
 def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None, dirs=(), verbose=True):
     """Audit the clean build <build_dir>/<name> against the original analysis and write audit.json / audit.md.
 
@@ -182,6 +216,7 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
     clean_folder = os.path.join(build_dir, name)
     clean_dir = os.path.join(build_dir, f"{name}_analysis")
     changes = json.load(open(os.path.join(build_dir, "changes.json"), encoding="utf-8"))
+    _check_log_shape(changes)
     with contextlib.closing(_db(orig_dir)) as odb0:      # closed at once: an open handle locks the file on Windows
         ometa = dict(odb0.execute("SELECT key, value FROM meta").fetchall())
     # the clean module is analysed with the original's haks, swapped for the haks the build actually points at:
@@ -286,6 +321,64 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
     # 4 modified files - every changed FIELD must be a logged change. Files are compared by SHA-256 first; only
     # files whose bytes differ are opened and compared field by field (leaf path -> (type, value))
     changed = sorted(f for f in set(ofiles) & set(cfiles) if ofiles[f] != cfiles[f])
+    import nwn_bpchanges
+    # bulk blueprint changes that set a localised text (name, description...): (blueprint type, resref, field label)
+    # -> the value they set. Only these may explain a changed localised text logged "(Blueprints page)": on that
+    # blueprint's own top-level field, or on a placed copy of it, with exactly that value. A log entry counts only
+    # when the owner's waiting change (<analysis>/blueprint_changes.json, the Blueprints page's file) says the same -
+    # the log alone explains nothing (three adversarial probes).
+    waiting = nwn_bpchanges.load_changes(orig_dir)
+    bc_text = {}
+    for c in changes.get("blueprint_changes") or []:
+        try:
+            if c.get("status") != "changed" or c.get("field") not in nwn_bpchanges.TEXT_FIELDS:
+                continue
+            ext, rr = str(c["type"]), str(c["resref"]).lower()
+            w_ = (waiting.get(ext) or {}).get(rr, {}).get(c["field"])
+            if not isinstance(w_, dict) or w_.get("to") != c["to"]:
+                continue                 # not a waiting change of the owner's: explains nothing (4c fails it)
+            bc_text[(ext, rr, nwn_bpchanges.FIELDS[ext][c["field"]])] = nwn_bpchanges.new_value(c["field"], c["to"])
+        except (AttributeError, KeyError, ValueError, TypeError):
+            continue
+    # merges of this build (removed duplicate -> keeper), from the ORIGINAL analysis' duplicate groups and the files
+    # the removals check proves gone: a placed copy of a merged-away blueprint is re-pointed to the keeper and then
+    # follows the keeper's bulk change
+    merged_nodes = {d.get("node") for d in changes.get("deleted") or [] if isinstance(d, dict)
+                    and d.get("status") == "merged"}
+    merge_to = {}
+    for g in o_rep.get("duplicates") or []:
+        for m_ in g.get("members") or []:
+            if m_.get("node") in merged_nodes and str(g.get("keeper", "")).startswith("bp:"):
+                merge_to[m_["node"][3:].rsplit(".", 1)[0].lower()] = g["keeper"][3:].rsplit(".", 1)[0].lower()
+
+    def owner_ext(f, parent):
+        """The blueprint type a struct at path `parent` of file f is a copy of: the file's own type at the top
+        level, an item in an ItemList / Equip_ItemList, a creature in an encounter's CreatureList, or the type of
+        an area's object list ("Creature List[0]" -> utc). None when it can't be told (then nothing is explained)."""
+        if not parent:
+            return f.rsplit(".", 1)[-1].lower()
+        last = re.sub(r"\[\d+\]$", "", parent.rsplit("/", 1)[-1])
+        if last in ("ItemList", "Equip_ItemList"):
+            return "uti"
+        if last == "CreatureList":
+            return "utc"
+        cls = nwn_index.GIT_LIST_CLASS.get(last)
+        return cls[1] if cls else None
+
+    def bc_explains(f, p_, ol, cl):
+        """True when a waiting bulk text change sets leaf p_ of file f to the value the clean copy holds. The owner
+        of a placed copy is read from the ORIGINAL (baseline) file: a TemplateResRef the build changed counts only
+        when it is a merge of this build (a forged one would carry approved text to another object)."""
+        label = p_.rsplit("/", 1)[-1]
+        parent = p_[:-len(label)].rstrip("/")
+        if parent:
+            was = str(ol.get(f"{parent}/TemplateResRef", (None, ""))[1] or "").lower()
+            now = str(cl.get(f"{parent}/TemplateResRef", (None, ""))[1] or "").lower()
+            owner = now if now == was or merge_to.get(was) == now else None
+        else:
+            owner = os.path.splitext(os.path.basename(f))[0].lower()
+        want = bc_text.get((owner_ext(f, parent), owner, label)) if owner else None
+        return want is not None and cl.get(p_, (None, None))[1] == want
     logged = defaultdict(dict)
     for c in changes["field_changes"]:
         logged[c["file"]][c["field"]] = c
@@ -294,16 +387,30 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
     o_erf = None if os.path.isdir(o_src) else n.Erf(o_src)
     o_entries = {e.filename: e for e in o_erf.entries} if o_erf else {}
     edited = {e.lower() for e in changes.get("edited", [])}
+    rewritten = set(changes["rewritten"])
     for f in changed:
-        if f.lower() in edited or f.lower() in compiled_new:
-            continue  # deliberately edited in the editor / recompiled - listed in the change log
-        if f not in set(changes["rewritten"]):
-            ev.append(f"changed without a logged reason: {f}"); continue
+        if f.lower() in compiled_new:
+            continue  # recompiled by the build - listed in the change log
         ext = f.rsplit(".", 1)[-1].lower()
-        if ext not in n.GFF_EXTENSIONS:
-            ev.append(f"non-GFF file changed: {f}"); continue
-        ob = o_erf.read(o_entries[f]) if o_erf else open(os.path.join(o_src, f), "rb").read()
         cb = open(os.path.join(clean_folder, f), "rb").read()
+        if f.lower() in edited:
+            # edited in the editor: the editor's copy (<analysis>/edits/) is the baseline, never trusted by name
+            # alone - a file the log calls edited must have that copy, and differ from it only by logged changes
+            ep = os.path.join(orig_dir, "edits", os.path.basename(f).lower())
+            if not os.path.isfile(ep):
+                ev.append(f"{f}: the change log calls it edited, but there is no edited copy in edits/ (discarded after "
+                          "the build? then build again)"); continue
+            ob = open(ep, "rb").read()
+            if ob == cb:
+                continue
+            if ext not in n.GFF_EXTENSIONS or f not in rewritten:
+                ev.append(f"{f}: differs from your edited copy"); continue
+        else:
+            if f not in rewritten:
+                ev.append(f"changed without a logged reason: {f}"); continue
+            if ext not in n.GFF_EXTENSIONS:
+                ev.append(f"non-GFF file changed: {f}"); continue
+            ob = o_erf.read(o_entries[f]) if o_erf else open(os.path.join(o_src, f), "rb").read()
         ol = {p_: (t, v) for p_, lab, t, v, _ in n.iter_gff_leaves(n.read_gff(ob))}
         cl = {p_: (t, v) for p_, lab, t, v, _ in n.iter_gff_leaves(n.read_gff(cb))}
         if ext == "itp":  # palette: only logged entries may disappear, nothing may change or appear
@@ -319,6 +426,13 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
         for p_ in sorted(set(ol) | set(cl)):
             if ol.get(p_) != cl.get(p_):
                 lg = logged[f].get(p_)
+                # a localised text may change only by a bulk blueprint change or the localised-text fix, which
+                # locstring_fix below re-proves - judged by the field's own type, never by what the log says about it
+                if (ol.get(p_) or cl.get(p_))[0] == n.CEXOLOCSTRING and lg and lg.get("strref") is None \
+                        and not ("(Blueprints page)" in (lg.get("why") or "") and bc_explains(f, p_, ol, cl)):
+                    ev.append(f"{f}: localised text {p_} changed by something other than a blueprint change or the "
+                              "localised-text fix")
+                    break
                 # the field must be logged AND hold the logged new value (resrefs compare case-insensitively)
                 if not lg or str(cl.get(p_, (0, None))[1]).lower() != str(lg["new"]).lower():
                     ev.append(f"{f}: field {p_} changed but not logged ({ol.get(p_, (0, None))[1]!r} -> "
@@ -366,7 +480,12 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
     # 4c bulk blueprint changes (Blueprints page) - proves each applied change is in the clean blueprint
     if changes.get("blueprint_changes"):
         import nwn_bpchanges
-        ev, done = [], [c for c in changes["blueprint_changes"] if c.get("status") == "changed"]
+        ev, done = [], [c for c in changes["blueprint_changes"] if isinstance(c, dict) and c.get("status") == "changed"]
+        for c in done:
+            w_ = ((waiting.get(str(c.get("type"))) or {}).get(str(c.get("resref", "")).lower()) or {}).get(c.get("field"))
+            if not isinstance(w_, dict) or w_.get("to") != c.get("to"):
+                ev.append(f"{c.get('resref')}.{c.get('type')}: {c.get('field')} -> {c.get('to')!r} is not a waiting "
+                          "change on the Blueprints page (undone after the build? then build again)")
         by_name = {os.path.basename(f).lower(): f for f in cfiles}
         roots = {}
         for c in done:
@@ -391,6 +510,82 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
               "Each changed blueprint in the clean module holds its new value; placed copies that followed are logged "
               "changes, checked field by field above.")
 
+    # 4d localised-text fix (plan "locstring_fix") - "modified" proved each changed field holds the logged new value;
+    # this proves the change itself obeys the rule: same number, only the talk table's language removed, and what
+    # was removed is that talk-table line (re-read here, not taken from the log)
+    lfix = [c for c in changes["field_changes"] if c.get("strref") is not None]
+    if changes.get("locstring_fix") is not None:
+        ev, warn = [], []
+        tl = None
+        # the fix only ever touches base-game numbers (dialog.tlk): the game's own table, from the original
+        # analysis or else the one the clean analysis just used (same game folder). Without it nothing can be proven,
+        # and a check that can't prove a removed text was the line must not pass it (an adversarial probe)
+        cmeta = dict(cdb.execute("SELECT key, value FROM meta").fetchall())
+        for cand in (ometa.get("tlk_base"), cmeta.get("tlk_base")):
+            try:
+                if cand and os.path.isfile(cand):
+                    tl = n.TlkSet(n.Tlk(cand), None)
+                    break
+            except (OSError, ValueError):
+                continue
+        if lfix and tl is None:
+            ev.append("the game's talk table (dialog.tlk) can't be read now, so the removed texts can't be proven to "
+                      "be its lines - set the NWN install folder in Settings and build again")
+        if changes["locstring_fix"].get("fields") != len(lfix):
+            ev.append(f"the change log counts {changes['locstring_fix'].get('fields')} removed text(s) but lists "
+                      f"{len(lfix)}")
+
+        def before_after(f):
+            """(original leaves, clean leaves) of one file; the original is the editor's copy when it was edited."""
+            if f.lower() in edited:
+                ob_ = open(os.path.join(orig_dir, "edits", os.path.basename(f).lower()), "rb").read()
+            else:
+                ob_ = o_erf.read(o_entries[f]) if o_erf else open(os.path.join(o_src, f), "rb").read()
+            cb_ = open(os.path.join(clean_folder, f), "rb").read()
+            return ({p_: (t, v) for p_, _l, t, v, _ in n.iter_gff_leaves(n.read_gff(ob_))},
+                    {p_: (t, v) for p_, _l, t, v, _ in n.iter_gff_leaves(n.read_gff(cb_))})
+        cache = {}
+        for c in lfix:
+            f, p_ = c["file"], c["field"]
+            try:
+                if f not in cache:
+                    cache[f] = before_after(f)
+                ol, cl = cache[f]
+                o, cv = ol.get(p_, (None, None))[1], cl.get(p_, (None, None))[1]
+                if not isinstance(o, n.LocString) or not isinstance(cv, n.LocString):
+                    ev.append(f"{f}: {p_} is not a localised text in both copies"); continue
+                lang = int(c.get("language", 0))
+                gone = {k: t for k, t in o.entries.items() if k // 2 == lang}
+                kept = {k: t for k, t in o.entries.items() if k // 2 != lang}
+                if o.strref >= n.CUSTOM_TLK_BIT:
+                    ev.append(f"{f}: {p_} uses the custom talk table - the fix never removes those texts")
+                elif cv.strref != o.strref or o.strref != c["strref"]:
+                    ev.append(f"{f}: {p_} talk-table number changed or misrecorded ({o.strref!r} -> {cv.strref!r}, "
+                              f"logged {c['strref']!r})")
+                elif cv.entries != kept or not gone:
+                    ev.append(f"{f}: {p_} lost more than its text in language {lang}, or nothing")
+                elif tl is not None:
+                    line = tl.get(o.strref)
+                    table = tl.base
+                    if (getattr(table, "language", 0) or 0) != lang or tl.status(o.strref) != "ok":
+                        ev.append(f"{f}: {p_} - the talk table's language or line doesn't match the change log")
+                    elif any(nwn_index._plain(t) != nwn_index._plain(line) for t in gone.values() if t):
+                        ev.append(f"{f}: {p_} - the removed text is not the talk-table line #{o.strref}")
+            except (OSError, KeyError, ValueError, TypeError, n.GffError) as ex:
+                ev.append(f"{f}: {p_} could not be checked ({ex!r})")
+        check("locstring_fix", "Removed localised texts only repeated their talk-table line",
+              "FAIL" if ev else ("WARN" if warn else "PASS"),
+              ev or warn or [f"{len(lfix)} text field(s) in {len({c['file'] for c in lfix})} file(s): number kept, "
+                             "only the repeated text removed"],
+              "Each changed text field is compared with the original: same talk-table number, only the entries in "
+              "the talk table's language removed, and those equal the talk-table line read again now.")
+    elif lfix:
+        check("locstring_fix", "Removed localised texts only repeated their talk-table line", "FAIL",
+              [f"{len(lfix)} localised-text change(s) logged, but the build says the fix was not run"],
+              "The change log and the build's settings disagree.")
+    if o_erf:
+        o_erf.close()        # an open handle locks the original .mod on Windows
+
     # 5 references - proves the clean module has no NEW issue (broken reference, validation error) compared with the
     # original. Issues are compared by signature (category, node, detail). A rebuilt hak's new name in a detail is
     # mapped back to the old name (back: new name -> old name), or every issue naming that hak would look new
@@ -409,6 +604,11 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
         d = re.sub(r"[;,]?\s*used by .*$", "", i["detail"])
         if back_re:                     # a rebuilt hak has a new name - it is still the same hak
             d = back_re.sub(lambda m: back[m.group(1).lower()], d)
+        if i["category"] in WORDING_ONLY:
+            # whether it is there matters, not its wording: an original analysed by an earlier version has older text
+            d = "*"
+        elif i["category"] == "locstring_both":
+            d = "*"                      # judged by its count in is_new
         if i["category"] == "resource_conflict":
             # the clean module is re-indexed without the builder's override folder (players don't have it), so the
             # override is left out of both sides' list of places; a "conflict" left with one place is no conflict
@@ -425,10 +625,22 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
         if i["category"] == "resource_conflict":
             o_places.setdefault(i["node"], set()).update(p_ for p_ in sig(i)[2].split(" | ") if p_)
 
+    def fields_of(i):
+        """The field count a locstring_both module warning starts with ("12 text field(s) in ..."), else 0."""
+        m_ = re.match(r"(\d+) text field", i.get("detail") or "")
+        return int(m_.group(1)) if m_ else 0
+    # the original's count: 0 when it was analysed with this check and had none; None when analysed before the check
+    o_loc = (sum(fields_of(i) for i in o_rep["issues"] if i["category"] == "locstring_both" and i["node"] == "module")
+             if o_rep.get("locstring_rules") else None)
+
     def is_new(i):
         s_ = sig(i)
         if s_[2] == "":                          # a resource_conflict that only involved the override
             return False
+        if i["category"] == "locstring_both":
+            # fewer such fields is the build (deletions, the localised-text fix) working: new only when the count
+            # grew. An original analysed before 1.5.9 has no count; the clean one is then not compared (not new)
+            return o_loc is not None and fields_of(i) > o_loc
         if i["category"] == "resource_conflict" and i["node"] in o_places:
             return not set(s_[2].split(" | ")) <= o_places[i["node"]]
         return s_ not in o_sig

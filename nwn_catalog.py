@@ -203,6 +203,7 @@ def build_catalog(analysis, verbose=True):
     # ---- talk tables: what the custom tlk provides, what is referenced, what is broken
     import nwnlib as n
     tlk = dict(custom_name=meta.get("tlk_custom_name") or "", custom_path=meta.get("tlk") or "",
+               custom_inside=meta.get("tlk_inside") or "",     # "module" / "hak:<name>": read from a packed copy
                base_path=meta.get("tlk_base") or "", custom_entries=0, custom_used=0, refs_total=0, refs_custom=0,
                broken=[], unused_custom=[], usage={})
     refs = db.execute("SELECT s.file_id, f.relpath, s.path, s.strref, s.custom, s.has_text, s.status FROM strrefs s "

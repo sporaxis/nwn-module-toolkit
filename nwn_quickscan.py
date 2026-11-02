@@ -361,9 +361,22 @@ def scan(module_path, haks=(), nwn_root=None, nwn_user=None, workspace=None):
     base_tlk = next((c for c in nwn_index.base_tlk_candidates(nwn_root) if os.path.isfile(c)), None)
     custom_name = module.get("custom_tlk") or ""
     custom_tlk = nwn_index.locate_custom_tlk(custom_name, nwn_root, nwn_user) if custom_name else None
-    tlk = dict(base=base_tlk, custom_name=custom_name, custom=custom_tlk,
-               custom_bytes=os.path.getsize(custom_tlk) if custom_tlk else 0)
+    # a custom tlk packed into a hak or the module (table of contents only - nothing is read): the analysis reads
+    # that copy and warns, since the game is documented to read a custom tlk from the tlk folder only
+    inside = ""
     if custom_name and not custom_tlk:
+        want = (custom_name.lower(), "tlk")
+        for s_ in [x for x in plan["sources"] if x["kind"] == "hak"] + [mod]:
+            if any((r, e) == want for r, e, _ in s_["items"]):
+                inside = "module" if s_ is mod else f"hak:{s_['name']}"
+                break
+    tlk = dict(base=base_tlk, custom_name=custom_name, custom=custom_tlk, custom_inside=inside,
+               custom_bytes=os.path.getsize(custom_tlk) if custom_tlk else 0)
+    if inside:
+        warnings.append(dict(level="warning", text=f"custom talk table '{custom_name}.tlk' is packed inside "
+                             f"{'the module' if inside == 'module' else 'the hak ' + repr(inside[4:])} and is not in the "
+                             "NWN tlk folder - the analysis will read that copy; check in game that custom names show"))
+    elif custom_name and not custom_tlk:
         warnings.append(dict(level="error", text=f"module.ifo names custom talk table '{custom_name}.tlk' but it was not "
                              "found in the NWN tlk folder"))
     if not nwn_root:

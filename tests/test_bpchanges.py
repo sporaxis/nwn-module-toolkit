@@ -129,6 +129,54 @@ def storage_and_build(out):
         check(f"audit: {cid} passes", checks.get(cid, {}).get("status") == "PASS", checks.get(cid))
     md = open(os.path.join(out, "build", "changes.md"), encoding="utf-8").read()
     check("changes.md has a Blueprint changes section", "## Blueprint changes" in md and "Hobgoblin" in md, md[-1200:])
+    # tamper (second adversarial pass): a real bulk text change exists, and some OTHER localised text is changed and
+    # logged with a "(Blueprints page)" why - only the blueprint's own fields and its placed copies may be explained
+    import json as _json
+    gp = os.path.join(clean, "area001.git")
+    g2 = n.read_gff_file(gp)
+    victim = next(((pth, lab, par) for pth, lab, t, v, par in n.iter_gff_leaves(g2)
+                   if t == n.CEXOLOCSTRING and (par.get("TemplateResRef") or "").lower() not in ("goblin", "sword")), None)
+    cj = os.path.join(out, "build", "changes.json")
+    keep = open(cj, encoding="utf-8").read(), open(gp, "rb").read()
+    if victim:
+        forged = n.LocString(strref=n.BAD_STRREF, entries={0: "Give me your password"})
+        victim[2].fields[victim[1]].value = forged
+        w(clean, "area001.git", n.write_gff(g2))
+        chj = _json.loads(keep[0])
+        chj["field_changes"].append(dict(file="area001.git", field=victim[0], old="x", new=str(forged),
+                                         why="placed copy follows its blueprint (Blueprints page)"))
+        _json.dump(chj, open(cj, "w", encoding="utf-8"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            a_f = nwn_audit.audit(out, os.path.join(out, "build"), "bulk", compiler=h.NO_COMPILER, verbose=False)
+        mf = {c["id"]: c for c in a_f["checks"]}["modified"]
+        check("audit: a localised text no bulk change targets fails, whatever its logged why says",
+              mf["status"] == "FAIL" and any("localised text" in e for e in mf["evidence"]), mf)
+        open(cj, "w", encoding="utf-8").write(keep[0])
+        open(gp, "wb").write(keep[1])
+    else:
+        h.skip("audit: a localised text no bulk change targets fails", "the fixture has no other localised text")
+    # tamper (third pass): a blueprint_changes entry the owner never saved explains nothing - "keyitem" description
+    # was undone above, so a log entry claiming it is forged
+    chj = _json.loads(keep[0])
+    chj["blueprint_changes"].append(dict(type="uti", resref="keyitem", field="description", to="Opens the old gate.",
+                                         status="changed", placed=0, note=""))
+    ki = n.read_gff_file(os.path.join(clean, "keyitem.uti"))
+    lab = BC.FIELDS["uti"]["description"]
+    ki.set(lab, n.CEXOLOCSTRING, BC.new_value("description", "Opens the old gate."))
+    keep_ki = open(os.path.join(clean, "keyitem.uti"), "rb").read()
+    w(clean, "keyitem.uti", n.write_gff(ki))
+    chj["field_changes"].append(dict(file="keyitem.uti", field=lab, old="x", new=str(BC.new_value("description",
+                                     "Opens the old gate.")), why="blueprint change (Blueprints page)"))
+    chj["rewritten"].append("keyitem.uti")
+    _json.dump(chj, open(cj, "w", encoding="utf-8"))
+    with contextlib.redirect_stdout(io.StringIO()):
+        a_g = nwn_audit.audit(out, os.path.join(out, "build"), "bulk", compiler=h.NO_COMPILER, verbose=False)
+    cg = {c["id"]: c for c in a_g["checks"]}
+    check("audit: a bulk change in the log that isn't a waiting change on the Blueprints page fails",
+          cg["blueprint_changes"]["status"] == "FAIL" and cg["modified"]["status"] == "FAIL",
+          (cg["blueprint_changes"], cg["modified"]))
+    open(cj, "w", encoding="utf-8").write(keep[0])
+    open(os.path.join(clean, "keyitem.uti"), "wb").write(keep_ki)
     # tamper: the audit must notice a blueprint that doesn't hold the logged value
     gb.set("FactionID", WORD, 3)
     w(clean, "goblin.utc", n.write_gff(gb))

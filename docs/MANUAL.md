@@ -133,8 +133,11 @@ older version's Build page says so instead of building without them, and refuses
   It holds `modules`, `hak`, `tlk`, `override`, `database` and `logs`. Haks, the custom talk table and the override
   folder are found here automatically. When `nwn.ini` there (or in the install folder) moves the hak, tlk or modules
   folder in its `[Alias]` section (`HAK=D:\NeverwinterNights\NWN\hak`), those folders are searched first.
-- **Compiler path** (optional): leave it empty when the compiler is in the toolkit's `tools` folder (see 2.2). The
-  line above the boxes says whether it was found.
+- **Script compiler** (optional): leave it empty when the compiler is in the toolkit's `tools` folder (see 2.2), or
+  set it to `nwn_script_comp` itself or to the folder you unzipped neverwinter.nim into (it looks inside, also in
+  `bin`). The line above the boxes says whether it was found, and when it wasn't, what to do: download the zip for
+  your system from github.com/niv/neverwinter.nim/releases, unzip it, then copy `nwn_script_comp` into `tools` or
+  point this setting at the folder. Without it everything else works; only the compile check is skipped.
 - **Log folders**: where the Log monitor looks. The label shows the folders it uses when you leave this empty.
 - **External tools** (optional): add any program you already use - a hak or 2da editor, an image viewer, a text
   editor - with **+ Add a tool**: a name, the program and the file types it opens (leave them empty to offer it for
@@ -212,13 +215,21 @@ module; no second JSON copy is kept (the detail panel shows a file's JSON from t
 Under **Optional** you can add hak files by hand (one per line), a talk table and an analysis name. Usually you
 need none of these: haks and the custom talk table are found from `module.ifo` and your NWN folders.
 
+If the custom talk table is not in your `tlk` folder but is packed inside the module or one of its haks, the analysis
+reads that copy (so custom names show and are checked) and adds one warning, **tlk_inside_module**. The game is
+documented to read a custom talk table from the `tlk` folder only, so start the module in game without the `tlk` folder
+copy and check a custom name: if it shows, accept the warning as by design; if it is blank, put the `.tlk` back in the
+`tlk` folder and send it out with the haks. The module and haks are only read; the copy is kept in the analysis folder
+(`tlk_from_module`, removed by **Clear**). A copy in your `tlk` folder always wins over a packed one.
+
 ### 4.2 Quick scan (TL;DR)
 **Quick scan** reads only `module.ifo`, the module's file list and each hak's table of contents. It never reads
 file contents, so it takes seconds even with gigabytes of haks, and it writes nothing. You get:
 
 - **Tiles**: areas, scripts, conversations, blueprints, number of haks (and how many are missing), the player
   download size (haks plus talk table), and the **estimated time for a full analysis**.
-- **Things to know**: warnings in plain words, such as a missing hak, a missing custom talk table, names longer than
+- **Things to know**: warnings in plain words, such as a missing hak, a missing custom talk table (or one packed
+  inside the module or a hak instead of the `tlk` folder), names longer than
   16 characters (the game cannot load those), a hak that adds nothing because every file in it is also in a hak above
   it, or module files that a hak replaces (edits to those in the module have no effect in game).
 - **Haks in load order**: the order in `module.ifo`, where **the first listed wins**. For each hak you see found,
@@ -322,8 +333,10 @@ files back (it never overwrites a file that has reappeared).
 
 ### 4.9 Compare modules
 **Compare modules** (under Start) shows what changed between two copies: pick the older and newer copy (a `.mod`, a
-module folder, or a snapshot) and optionally an analysis for impact levels. The pick list offers your analysed modules,
-the `.mod` files in their folders (newest first, with date and size) and your snapshots. A module that has been
+module folder, or a snapshot) and optionally an analysis for impact levels. Each copy has a **Pick a copy…** list
+that names files by their file name (hover for the full path) in three groups - **Analysed**, **Modules folder** (the
+`.mod` files in their folders, newest first, with date and size) and **Snapshots** - and fills in the path below it;
+you can also paste a path there yourself. A module that has been
 renamed, moved or archived since it was analysed is not offered (the page lists it as *not offered*), and the Modules
 page marks its analysis **file not found**. If a path you type is not there, the warning says so and names files in the
 same folder with the same name apart from date stamps (for example `20261011_Name.mod` for `Name.mod`), the likely
@@ -536,7 +549,16 @@ the thing it is about.
   the source (**Show compiled code**, see 5.3), check that the source is the version you want, then recompile.
 
 Scripts nothing runs get notes instead. A script whose include can't be read (a base-game include without the NWN
-install folder set, or a missing hak) is not judged. The check compares text only (see 15).
+install folder set, or a missing hak) is not judged. The check compares text only (see 15). Text written with `\x`
+escapes (`"\x20\x8E\xFF"`, as colour tables are) and text from includes several levels into the base game's own
+includes are taken into account.
+
+**Text in two places**: `locstring_both` (a note per file, one warning for the module) lists names and descriptions
+that hold both a talk-table number and their own text (a custom talk-table line repeated word for word is left out:
+every player sees the same words, and the text is the fallback when the custom .tlk can't be loaded). The game shows the text to players whose game language has it
+and the talk-table line to everyone else, so players in other languages see different (often older) text. Where the
+text equals the talk-table line, remove the text; where it differs, set the number to -1. If all your players use one
+language, accept it as by design.
 
 **Known NWN:EE pitfalls** are checked too (each one came up again and again on the community forums):
 
@@ -1246,6 +1268,17 @@ When the original is a `.mod`, the clean `.mod` keeps its description (shown on 
 original `.mod` that lists one name twice (two entries whose names differ only in capitals) gives the clean module the
 first one, as neverwinter.nim's tools do, with a warning.
 
+**Remove repeated texts** (optional; shown only when the analysis found some): *also remove N repeated text(s) that
+only copy their talk-table line*. A name or description that holds a talk-table number and its own text shows that
+text only to players whose game language has it (Issues: `locstring_both`). Where the text is exactly the talk-table
+line of the game's own talk table, the build removes the text and keeps the number, so every language shows its own
+translation. Texts that differ from their line are never changed - decide those yourself (set the number to -1 to keep
+your text for everyone). Lines of your custom talk table are not touched (it has one language, so every player already
+sees the same words, and the text is what shows when a player's game can't load the custom .tlk), nor are texts with a
+separate female version. Only the module's own files are changed, never haks. The audit needs the game folder (Settings)
+to re-read the game's talk table: without it the check fails rather than pass unproven. The change log lists every field, and the audit check
+`locstring_fix` proves each one kept its number and lost only text equal to the talk-table line.
+
 **Lean haks** (optional, recommended for a persistent world, because players download the haks and size means load time):
 - *Builder mode* (the default): the haks stay a builder's palette. Only duplicate copies and dead-end content (such as orphan
   walkmeshes) are dropped. Everything else is listed for your review.
@@ -1320,6 +1353,11 @@ analysed with when Settings has none) and checks that:
 - journal quests and conversations are preserved,
 - everything in use is still reachable,
 - lean haks keep every 2da identical,
+- with *remove repeated texts* ticked, each changed text kept its talk-table number and lost only text equal to that line,
+- a changed name or description is explained by a rule: the repeated-text removal, or a waiting **Change fields…**
+  change on that blueprint (its own field, or a placed copy of it). A file the build lists as edited must match your
+  edited copy. So if you **Undo** waiting changes or **Discard** an edit after a build, running the audit again on
+  that build fails - build again instead.
 - all scripts compile (with the compiler installed), and every edited script was compiled: an edited script whose
   `.ncs` is still the original is a warning - the game would run the old code.
 

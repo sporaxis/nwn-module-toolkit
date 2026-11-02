@@ -14,7 +14,8 @@ A plan (JSON) says what to do - the dashboard writes it for you:
      "allow_review": false}              # must be true to delete 'Review' items
 Optional plan keys: "apply_edits" (default true: use <analysis>/edits/), "palette_moves" (default true: apply the
 Blueprints page's waiting moves, <analysis>/palette_moves.json), "git" (default true), "lean_haks", "lean_haks_mode"
-("builder" or "minimal") and "lean_haks_aggressive".
+("builder" or "minimal") and "lean_haks_aggressive", "locstring_fix" (default false: in the module's own files, drop
+a localised text that only repeats its talk-table line - the number stays; see _locstring_targets).
 
     python nwn_build.py <analysis folder> <plan.json> [--out DIR] [--name NAME] [--no-audit]
 
@@ -117,6 +118,9 @@ class Rewriter:
         self.bc_applied = set()           # (ext, resref) whose blueprint got its changes
         self.bc_placed = defaultdict(int)  # (ext, resref, field) -> placed copies changed
         self.changes = []
+        # localised-text fix (plan "locstring_fix"; set by build()): dict(tlk=TlkSet, files={relpath lower: {paths}})
+        self.loc_fix = None
+        self.loc_fixed = 0                # fields whose repeated text was removed
 
     def rewrite(self, fname, ext, root):
         """Rewrite one parsed GFF file in place. fname: its path in the module (for the change log); ext: its
@@ -156,7 +160,34 @@ class Rewriter:
                         self.changes.append(dict(file=self.cur, field=label, old=None, new=_logval(new),
                                                  why="blueprint change (Blueprints page)"))
                 self.bc_applied.add(key)
+        if self.loc_fix and fname.lower() in self.loc_fix["files"]:
+            self._fix_locstrings(root, self.loc_fix["files"][fname.lower()])
         return len(self.changes) > before
+
+    def _fix_locstrings(self, root, paths):
+        """Drop the text of a localised string that only repeats its talk-table line (nwn-issues #370): the number
+        stays, so every game language shows its own translation of that line. Only the fields the analysis listed
+        (paths) are looked at, and each is judged again here with nwn_index.locstring_both - the copy being built
+        may be an edited one. Removed: the entries in the talk table's language (both genders); other languages are
+        kept. A string whose text differs from the line is never touched (a person decides those). Each change is
+        logged with the strref, language and line, which the audit's locstring_fix check re-proves."""
+        import nwn_index
+        tlk = self.loc_fix["tlk"]
+        for path, label, ftype, value, parent in list(n.iter_gff_leaves(root)):
+            if ftype != n.CEXOLOCSTRING or path not in paths:
+                continue
+            both = nwn_index.locstring_both(value, tlk)
+            if not both or not both[0] or value.strref >= n.CUSTOM_TLK_BIT:
+                continue                  # (locstring_both never calls a custom line "same"; checked here as well)
+            table = tlk.custom if value.strref >= n.CUSTOM_TLK_BIT else tlk.base
+            lang = getattr(table, "language", 0) or 0
+            new = n.LocString(strref=value.strref,
+                              entries={k: t for k, t in value.entries.items() if k // 2 != lang})
+            parent.fields[label].value = new
+            self.changes.append(dict(file=self.cur, field=path, old=_logval(value), new=_logval(new),
+                                     why="localised text removed: it repeats its talk-table line",
+                                     strref=value.strref, language=lang, line=tlk.get(value.strref)))
+            self.loc_fixed += 1
 
     def _set(self, s, label, new, path, why):
         """Set one field and log the change (path is the GFF field path used by the audit)."""
@@ -358,16 +389,52 @@ BC_TYPE = {f: n.CEXOLOCSTRING for f in nwn_bpchanges.TEXT_FIELDS}
 BC_TYPE.update(tag=n.CEXOSTRING, faction=n.WORD, **{f: n.BYTE for f in nwn_bpchanges.FLAG_FIELDS})
 
 
+def _locstring_targets(db, plan, meta, warnings):
+    """What the localised-text fix (plan "locstring_fix") will look at, or None when it is off or can't run.
+
+    db: the analysis index; meta: its meta table as a dict; warnings: the build log's list (a reason is added when
+    the fix was asked for but can't run). Returns dict(tlk=nwnlib.TlkSet, files={module relpath lower: {GFF field
+    paths}}) - the module's own files only (haks belong to their authors), and only fields the analysis judged
+    "same text as the line". The talk tables are the ones the analysis read (meta tlk_base / tlk); without them
+    nothing is changed. Reads only; a database error other than a missing table is raised (the build stops).
+    Only base-game numbers (dialog.tlk) are ever fixed: locstring_both never calls a custom line "same"."""
+    if not plan.get("locstring_fix"):
+        return None
+    try:
+        rows = db.execute("SELECT x.relpath, l.path FROM locstrings l JOIN files x ON x.id=l.file_id "
+                          "JOIN sources s ON s.id=x.source_id WHERE s.kind='module' AND l.same=1").fetchall()
+    except sqlite3.OperationalError:
+        warnings.append("localised-text fix not applied: this analysis predates it - press Analyse again")
+        return None
+    base = custom = None
+    try:
+        if meta.get("tlk_base") and os.path.isfile(meta["tlk_base"]):
+            base = n.Tlk(meta["tlk_base"])
+        if meta.get("tlk") and os.path.isfile(meta["tlk"]):
+            custom = n.Tlk(meta["tlk"])
+    except (OSError, ValueError) as ex:
+        warnings.append(f"localised-text fix not applied: a talk table could not be read ({ex})")
+        return None
+    if base is None and custom is None:
+        warnings.append("localised-text fix not applied: the talk tables the analysis used are not there any more")
+        return None
+    files = defaultdict(set)
+    for rel, path in rows:
+        files[rel.lower()].add(path)
+    return dict(tlk=n.TlkSet(base, custom), files=dict(files))
+
+
 def _logval(v):
     """A field value as the change log keeps it: localised texts as their text form (json can't hold them)."""
     return str(v) if isinstance(v, n.LocString) else v
 
 
-def _blueprint_changes(plan, changes, files, delete_nodes, merged_away, read):
+def _blueprint_changes(plan, changes, files, delete_nodes, merged_away, read, removed=()):
     """The waiting bulk blueprint changes (nwn_bpchanges.load_changes) this build will apply.
 
     changes: the waiting changes; files: the module's files rows (relpath, resref, ext, node, sha); read(relpath):
-    the bytes the build will copy (the edits overlay's copy when there is one). Each blueprint is read to learn its
+    the bytes the build will copy (the edits overlay's copy when there is one); removed: file names the edits
+    remove (a renamed or deleted blueprint is skipped like a deleted one). Each blueprint is read to learn its
     old values, which decide which placed copies follow. Returns ({(ext, resref): {label: (old, new, field, every)}}
     - every: the change has copies "all", so placed copies holding their own value change too - , log
     entries [{type, resref, field, from, to, status "changed"/"skipped", note, placed}]). plan["blueprint_changes"]
@@ -386,6 +453,7 @@ def _blueprint_changes(plan, changes, files, delete_nodes, merged_away, read):
             rel = where.get((ext, rr))
             why = ("deleted in this build" if node in delete_nodes else
                    "merged into its duplicate group's keeper in this build" if node in merged_away else
+                   "removed in your edits (Find & replace)" if f"{rr}.{ext}" in removed else
                    "not a blueprint of the module (any more)" if not rel else
                    "" if ext in nwn_bpchanges.FIELDS else "unknown blueprint type")
             root = None
@@ -581,7 +649,9 @@ def build(analysis_dir, plan, out_dir=None, name=None, run_audit=True, verbose=T
     target, stale_mod = check_target(module_path, out_dir, name)
     meta_ = dict(db.execute("SELECT key, value FROM meta").fetchall())
     # checked now, before the previous build's reports are removed (its changes.json says whether the tlk copy is ours)
-    tlk_dest, tlk_copy = check_tlk_target(meta_.get("tlk"), out_dir)
+    # a talk table packed inside the module (or a hak) travels inside it: the analysis' own copy of it
+    # (tlk_from_module/, a lower-cased safe name) is never put next to the build as if it were a separate file
+    tlk_dest, tlk_copy = check_tlk_target(None if meta_.get("tlk_inside") else meta_.get("tlk"), out_dir)
     if plan.get("lean_haks") and os.path.isdir(os.path.join(out_dir, "haks")):
         import nwn_hakslim
         nwn_hakslim.existing_lean_haks(os.path.join(out_dir, "haks"))   # refuse now if haks/ holds haks we didn't write
@@ -699,7 +769,9 @@ def build(analysis_dir, plan, out_dir=None, name=None, run_audit=True, verbose=T
         return erf.read(erf_entries[relpath]) if erf else n.read_file_inside(module_path, relpath)
     # bulk blueprint changes the Blueprints page left waiting (blueprint_changes.json)
     rw.bp_changes, bc_log = _blueprint_changes(plan, nwn_bpchanges.load_changes(analysis_dir), files, delete_nodes,
-                                               merged_away, read_for_build)
+                                               merged_away, read_for_build,
+                                               removed={f for f, e in edits.items() if e.get("kind") == "deleted"})
+    rw.loc_fix = _locstring_targets(db, plan, meta_, log["warnings"])
     git_info = None
     if new_repo:
         # first build: commit the untouched original so every later change is a readable git diff
@@ -776,7 +848,9 @@ def build(analysis_dir, plan, out_dir=None, name=None, run_audit=True, verbose=T
         moved_here = palette_moves and ((ext, (resref or "").lower()) in palette_moves or ext == "itp")
         # bulk changes need the changed blueprints and the areas' placed objects (.git) parsed
         changed_here = rw.bp_changes and (ext == "git" or (ext, (resref or "").lower()) in rw.bp_changes)
-        if ext in n.GFF_EXTENSIONS and (script_map or dlg_map or bp_map or removed_bps or moved_here or changed_here):
+        loc_here = rw.loc_fix and relpath.lower() in rw.loc_fix["files"]
+        if ext in n.GFF_EXTENSIONS and (script_map or dlg_map or bp_map or removed_bps or moved_here or changed_here
+                                        or loc_here):
             try:
                 root = n.read_gff(data)
                 if rw.rewrite(relpath, ext, root):
@@ -794,6 +868,9 @@ def build(analysis_dir, plan, out_dir=None, name=None, run_audit=True, verbose=T
     log["palette_moves"] = move_log
     _finish_blueprint_changes(bc_log, rw)
     log["blueprint_changes"] = bc_log
+    if rw.loc_fix is not None:
+        log["locstring_fix"] = dict(fields=rw.loc_fixed, files=len({c["file"] for c in rw.changes
+                                                                    if c.get("strref") is not None}))
     # brand-new files created in the editor / script generator
     have = {f"{r}.{e}" for r, e, _ in packed}
     for fname_l, info in edits.items():
@@ -1011,9 +1088,13 @@ _RUNNABLE = re.compile(r"\bvoid\s+main\s*\(|\bint\s+StartingConditional\s*\(")
 
 
 def _no_comments(src):
-    """Source with // and /* */ comments blanked out, so a commented-out main() doesn't count. The regex matches a
-    string literal ("a // b" - kept as it is), a // line comment or a /* block */ comment (each replaced by a space)."""
-    return re.sub(r'"(?:\\.|[^"\\\n])*"|//[^\n]*|/\*.*?\*/', lambda m: m.group(0) if m.group(0)[0] == '"' else " ", src, flags=re.S)
+    """Source with comments removed and string literals emptied, so neither a commented-out main() nor one inside a
+    string (a library building a script chunk: "void main() {" + ... for ExecuteScriptChunk) counts. Uses the index's
+    hand-written scanner (nwn_index.lex_nss, linear in the length of the file) - a regex here was quadratic on a
+    line of thousands of escaped quotes (an adversarial probe) - then empties the literals it left in."""
+    import nwn_index
+    code = nwn_index.lex_nss(src)[0]
+    return nwn_index.STRING_LIT_RE.sub('""', code)
 
 
 def _edited_includes(analysis_dir, edits):
@@ -1248,6 +1329,12 @@ def write_changes_md(path, log):
         L += [f"| {TYPE_LABEL.get(c['type'], c['type'])} | {c['resref']} | {c['field']} | {c['from']} | {c['to']} | "
               f"{c.get('placed', 0)}{' (all copies)' if c.get('copies') == 'all' else ''} | {c['status']}{': ' + c['note'] if c.get('note') else ''} |"
               for c in log["blueprint_changes"]]
+    if log.get("locstring_fix") is not None:
+        lf = log["locstring_fix"]
+        L += ["", "## Localised texts that repeated their talk-table line", "",
+              f"{lf['fields']} text field(s) in {lf['files']} file(s): the text was removed and the talk-table number "
+              "kept, so every game language shows its own translation. Texts that differ from their line were left "
+              "alone (Issues page, locstring_both). Each one is listed under Rewritten references below."]
     L += ["", "## Rewritten references", "", "| File | Field | Old | New | Why |", "|---|---|---|---|---|"]
     L += [f"| {c['file']} | {c['field']} | {c['old']} | {c['new']} | {c['why']} |" for c in log["field_changes"]]
     if log["refused"]:

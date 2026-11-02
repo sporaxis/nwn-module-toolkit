@@ -64,6 +64,9 @@ def run_case(tmp, with_haks):
           finished and state_kept and runs > 1, (finished, state_kept, runs))
     for q in TABLES:
         a, b = rows(os.path.join(single, "index.sqlite"), q), rows(os.path.join(chunked, "index.sqlite"), q)
+        if "FROM meta" in q:     # a path inside the analysis folder (the copy of a tlk packed in the module) names it
+            a = [tuple(str(v).replace(single, "<out>") for v in r) for r in a]
+            b = [tuple(str(v).replace(chunked, "<out>") for v in r) for r in b]
         check(f"chunked == single{label}: {q.split(' FROM ')[1]} ({len(a)} vs {len(b)}, {runs} runs)", a == b,
               (len(a), len(b)))
     check(f"chunked run{label}: index.state is removed once the index is complete",

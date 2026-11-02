@@ -1445,6 +1445,44 @@ def run_analysis(out_dir, verbose=True):
                                label=f["relpath"], detail=f"{path}: string #{strref} is not in the "
                                f"{'custom' if custom else 'base'} talk table" +
                                (" (falls back to the embedded text)" if has_text else " - shows as blank in game")))
+    # localised strings holding both a talk-table number and their own text (nwn-issues #370; a tester's report): one
+    # info row per module file, and one warning for the module, so a big module isn't flooded. An index made before
+    # 1.5.9 has no locstrings table: nothing is reported (Analyse again adds it).
+    try:
+        ls_rows = db.execute("SELECT file_id, path, strref, same, text, tlk_text FROM locstrings").fetchall()
+        locstring_rules = 1
+    except sqlite3.OperationalError:
+        ls_rows, locstring_rules = [], None     # an index from before 1.5.9: the report says it lacks the check
+    by_file = defaultdict(list)
+    for fid, path, strref, same, text, tlk_text in ls_rows:
+        f = file_by_id.get(fid)
+        if f and f["source"] == "module":
+            by_file[fid].append((path, strref, same, text, tlk_text))
+    for fid, rows in sorted(by_file.items(), key=lambda kv: file_by_id[kv[0]]["relpath"]):
+        f = file_by_id[fid]
+        same = [r for r in rows if r[2]]
+        diff = [r for r in rows if not r[2]]
+        parts = []
+        if same:
+            parts.append(f"{len(same)} the same as the talk-table line - remove the text: "
+                         + ", ".join(f"{p} (#{sr})" for p, sr, *_ in same[:3]) + (" ..." if len(same) > 3 else ""))
+        if diff:
+            parts.append(f"{len(diff)} different from it - set the number to -1: "
+                         + ", ".join(f"{p} (#{sr}: {t[:30]!r} vs {tt[:30]!r})" for p, sr, _s, t, tt in diff[:3])
+                         + (" ..." if len(diff) > 3 else ""))
+        issues.append(dict(severity="info", category="locstring_both", node=f["node"], label=f["relpath"],
+                           detail=f"{len(rows)} text field(s) hold both a talk-table number and their own text, so "
+                                  "players see different text by game language: " + "; ".join(parts)))
+    # counts for the Build page's "remove repeated texts" option (only the same-as-the-line ones are fixed by a build)
+    locstring_counts = dict(same=sum(1 for v in by_file.values() for r in v if r[2]),
+                            different=sum(1 for v in by_file.values() for r in v if not r[2]))
+    if by_file:
+        n_fields = sum(len(v) for v in by_file.values())
+        issues.append(dict(severity="warning", category="locstring_both", node="module", label="module",
+                           detail=f"{n_fields} text field(s) in {len(by_file)} file(s) hold both a talk-table number "
+                                  "and their own text: players whose game language has that text see it, everyone "
+                                  "else sees the talk-table line instead - harmless if every player uses the same "
+                                  "language as the toolset, wrong text for the others (see the per-file notes)"))
     for res, srcs in db.execute("SELECT * FROM conflicts"):
         # haks that carry the same model/texture/material are layered on purpose (load order picks one - the Hak
         # catalogue shows which): an info note. A warning only when the module's own copy or the override is involved
@@ -2656,7 +2694,7 @@ def run_analysis(out_dir, verbose=True):
                   # held when analysed, so the page can tell "loaded since - Analyse again"
                   db_named=[dict(node=k, label=g.label(k)) for k in db_named[:5000]], db_named_count=len(db_named),
                   db_words=len(db_words), db_words_sig=words_signature(db_words),
-                  same_stats_rules=1,
+                  same_stats_rules=1, locstring_rules=locstring_rules, locstring_counts=locstring_counts,
                   map_summary=map_summary,
                   asset_duplicates=asset_dups, deletions=deletions, areas=areas, conversations=convs, conversation_dynamic_starts=dyn_starts[:300], quests=quests,
                   inferred_quests=inferred, var_audit=var_audit, pw_performance=pw_perf, factions=factions, databases=databases,

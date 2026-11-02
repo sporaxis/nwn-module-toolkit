@@ -121,6 +121,9 @@ REANALYSE = [
     # same_stats_rules 1: "same stats, different name/look" only among items with a property (keys, pages never)
     dict(key="same_stats_rules", since="1.5.8",
          what="Duplicates: no more 'same stats' groups of keys and pages (only items with a property are grouped)"),
+    dict(key="locstring_rules", since="1.5.9",
+         what="Text fields holding both a talk-table number and their own text (wrong text for other game languages); "
+              "fewer false 'stale compiled script' and 'not compiled' warnings"),
 ]
 
 # --- (a) bringing work across -------------------------------------------------------------------------------
@@ -177,7 +180,7 @@ def missing_features(report):
     r = report or {}
 
     def lacks(f):
-        if f["key"] not in r:
+        if r.get(f["key"]) is None:      # missing, or written as null (a check the analysis couldn't run)
             return True
         v = r[f["key"]]
         return "value" in f and isinstance(v, int) and v < f["value"]

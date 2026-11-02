@@ -767,6 +767,31 @@ def test_compiler_platform(tmp, mod, out, rep):
     with mock.patch.dict(os.environ, NWN_SCRIPT_COMP=silent):
         check("compiler: a compiler path that was given but is missing is not replaced by another one",
               nwn_compile.find_compiler(os.path.join(d, "nope")) is None)
+    # the owner set Settings to the unzipped neverwinter.nim FOLDER (2026-10-31): look inside it, and when nothing is
+    # usable, say what to do in plain steps (where to download, which zip, where to put it, that it is optional)
+    nim = os.path.join(d, "neverwinter.nim"); os.makedirs(os.path.join(nim, "bin"))
+    exe = os.path.join(nim, "bin", nwn_compile.EXE); w(os.path.join(nim, "bin"), nwn_compile.EXE, "#!/bin/sh\nexit 0\n")
+    os.chmod(exe, 0o755)
+    check("compiler: a folder set in Settings is looked into (the unzipped release, compiler in bin/)",
+          nwn_compile.find_compiler(nim) == exe, nwn_compile.find_compiler(nim))
+    empty = os.path.join(d, "empty.nim"); os.makedirs(empty)
+    why = nwn_compile.not_found_reason(empty)
+    check("compiler: a folder with no compiler: the reason names the folder and says how to get one",
+          nwn_compile.find_compiler(empty) is None and empty in why and nwn_compile.RELEASES_URL in why
+          and "tools folder" in why and "skipped" in why, why)
+    why = nwn_compile.not_found_reason(os.path.join(d, "gone", "nwn_script_comp.exe"))
+    check("compiler: a path that is not there: the reason says so and how to get one",
+          "not there any more" in why and nwn_compile.RELEASES_URL in why, why)
+    big = os.path.join(d, "downloads"); os.makedirs(os.path.join(big, "zz_release", "bin"))
+    for i_ in range(nwn_compile.FOLDER_CAP + 5):
+        open(os.path.join(big, f"f{i_:05d}.txt"), "w").close()
+    why = nwn_compile.not_found_reason(big)
+    check("compiler: a folder too big to search says so (point Settings at the release folder), not 'has no compiler'",
+          "too many files" in why and nwn_compile.find_compiler(big) is None, why[:120])
+    with mock.patch.object(nwn_compile, "_candidates", lambda e: [None]):
+        why = nwn_compile.not_found_reason(None)
+    check("compiler: none found anywhere: the reason gives the download page and the steps",
+          nwn_compile.RELEASES_URL in why and "unzip" in why, why)
     name = "compiler: a file without execute permission is not used, and the reason says chmod +x"
     if os.name == "nt":
         skip(name, "Windows has no execute bit: any existing file can be started")
