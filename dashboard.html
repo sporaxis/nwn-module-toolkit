@@ -2504,7 +2504,8 @@ function varsTab(host, va){
 }
 const TFIX = {missing: "Give an object this exact tag, fix the spelling in the script, or tick By design on the Issues page if a script creates it with that tag.",
   case_twin: "Make the capitals match between the script and the object's tag.",
-  blueprint_only: "Place the object, spawn it (CreateObject) or sell it - or fix the lookup if another object was meant."};
+  blueprint_only: "Place the object, spawn it (CreateObject) or sell it - or fix the lookup if another object was meant.",
+  runtime_unused: "The only script that gives this tag is one nothing runs: hook it up to the event that should run it, or give the object the tag in the toolset."};
 const PFIX = {perf_inventory: "Split the inventory over several containers/stores, or create the items when a player opens it.",
   perf_area_heartbeats: "Use one area heartbeat or trigger/OnEnter logic instead of per-object heartbeats, or skip the work when no player is in the area.",
   perf_heavy_heartbeat: "Don't walk all objects every 6 s: cache on OnEnter/OnSpawn, use a trigger, or run only when a player is present.",
@@ -2513,11 +2514,11 @@ const PFIX = {perf_inventory: "Split the inventory over several containers/store
   perf_delay_in_loop: "Queue one DelayCommand for the whole job, or spread the work over several heartbeats.",
   perf_self_reschedule: "Make sure the loop stops (a condition or counter), or move it to a heartbeat.",
   perf_empty_heartbeat: "Clear the empty heartbeat slot."};
-const TSTAT = {missing: "no such tag", case_twin: "capital letters differ", blueprint_only: "only on an unused blueprint", spawned: "spawned/sold at run time", runtime: "tag given at run time", placed: "placed"};
+const TSTAT = {missing: "no such tag", case_twin: "capital letters differ", blueprint_only: "only on an unused blueprint", runtime_unused: "given only by an unused script", spawned: "spawned/sold at run time", runtime: "tag given at run time", placed: "placed"};
 // Tags tab: every tag the scripts look up, and whether an object really has it.
 function tagsTab(host, va){
   const ts = va.tags, cnt = k => ts.filter(x => x.status === k).length;
-  host.innerHTML = `<div class="tiles">${["missing","case_twin","blueprint_only","spawned","placed"].map(k => `<div class="tile click" role="button" tabindex="0" data-st="${k}"><div class="v">${fmtN(cnt(k))}</div><div class="l">${TSTAT[k]}</div></div>`).join("")}</div>
+  host.innerHTML = `<div class="tiles">${["missing","case_twin","blueprint_only","runtime_unused","runtime","spawned","placed"].map(k => `<div class="tile click" role="button" tabindex="0" data-st="${k}"><div class="v">${fmtN(cnt(k))}</div><div class="l">${TSTAT[k]}</div></div>`).join("")}</div>
     <p class="small muted">Tags the scripts look up by name (<span class="mono">GetObjectByTag</span>, <span class="mono">GetWaypointByTag</span>, <span class="mono">GetNearestObjectByTag</span>, <span class="mono">GetItemPossessedBy</span>…). Tags are case-sensitive. A tag that exists only on a blueprint nothing places, spawns or sells can't be found. A missing tag is fine only if a script creates the object with that tag at run time from a name it builds. Also in <span class="mono">reports/tag_lookups.csv</span>.</p>
     <div class="filters" id="tfb"></div><div id="tt"></div>`;
   let t;

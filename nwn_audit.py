@@ -174,6 +174,10 @@ def _palette_listing(root):
 # versions (1.5.9 says where it looked for the talk table), and an original analysed by an older version must not make
 # the same finding look new
 WORDING_ONLY = {"tlk_not_found", "tlk_inside_module"}
+# categories whose detail starts with a count ("12 text field(s)", "3 portrait row(s)"): new only when the count grew -
+# fewer is the build working, and an original analysed by an older version counted more (1.5.10 leaves the game's
+# own portrait rows out), so a smaller count must not look new while a larger one (an edit adding rows) still does
+COUNTED = {"locstring_both": r"(\d+) text field", "portrait_files": r"(\d+) portrait row"}
 
 
 def _check_log_shape(changes):
@@ -607,7 +611,7 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
         if i["category"] in WORDING_ONLY:
             # whether it is there matters, not its wording: an original analysed by an earlier version has older text
             d = "*"
-        elif i["category"] == "locstring_both":
+        elif i["category"] in COUNTED:
             d = "*"                      # judged by its count in is_new
         if i["category"] == "resource_conflict":
             # the clean module is re-indexed without the builder's override folder (players don't have it), so the
@@ -625,24 +629,38 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
         if i["category"] == "resource_conflict":
             o_places.setdefault(i["node"], set()).update(p_ for p_ in sig(i)[2].split(" | ") if p_)
 
-    def fields_of(i):
-        """The field count a locstring_both module warning starts with ("12 text field(s) in ..."), else 0."""
-        m_ = re.match(r"(\d+) text field", i.get("detail") or "")
+    def count_of(i):
+        """The count a COUNTED issue's detail starts with ("12 text field(s) in ..."), else 0."""
+        m_ = re.match(COUNTED.get(i["category"], "$^"), i.get("detail") or "")
         return int(m_.group(1)) if m_ else 0
-    # the original's count: 0 when it was analysed with this check and had none; None when analysed before the check
-    o_loc = (sum(fields_of(i) for i in o_rep["issues"] if i["category"] == "locstring_both" and i["node"] == "module")
-             if o_rep.get("locstring_rules") else None)
+    # the original's count per (category, node): for locstring_both 0 when it was analysed with the check and had
+    # none, None when analysed before the check existed (1.5.9's locstring_rules); portrait_files always existed
+    o_counts = defaultdict(int)
+    for i in o_rep["issues"]:
+        if i["category"] in COUNTED:
+            o_counts[(i["category"], i["node"])] += count_of(i)
+    # the best (lowest) severity each signature had in the original: the same finding that was a note there and is a
+    # warning or error now is new (an edit removing the script that gave a tag at run time; second adversarial pass)
+    rank = {"info": 0, "warning": 1, "error": 2}
+    o_best = {}
+    for i in o_rep["issues"]:
+        k_ = sig(i)
+        o_best[k_] = min(o_best.get(k_, 9), rank.get(i.get("was") or i["severity"], 1))
 
     def is_new(i):
         s_ = sig(i)
         if s_[2] == "":                          # a resource_conflict that only involved the override
             return False
-        if i["category"] == "locstring_both":
-            # fewer such fields is the build (deletions, the localised-text fix) working: new only when the count
-            # grew. An original analysed before 1.5.9 has no count; the clean one is then not compared (not new)
-            return o_loc is not None and fields_of(i) > o_loc
+        if i["category"] in COUNTED:
+            # fewer is the build (deletions, the localised-text fix) working: new only when the count grew. An
+            # original analysed before 1.5.9 has no locstring_both count; the clean one is then not compared
+            if i["category"] == "locstring_both" and not o_rep.get("locstring_rules"):
+                return False
+            return count_of(i) > o_counts[(i["category"], i["node"])]
         if i["category"] == "resource_conflict" and i["node"] in o_places:
             return not set(s_[2].split(" | ")) <= o_places[i["node"]]
+        if s_ in o_best and o_best[s_] < rank.get(i.get("was") or i["severity"], 1):
+            return True                  # the same finding, but worse than in the original
         return s_ not in o_sig
     # "was": a severity the analysis lowered only because something wasn't loaded (nwn_analysis.include_notes - a hak the
     # module lists not found); the audit's analysis of the clean module has the same gap, so it judges the original one

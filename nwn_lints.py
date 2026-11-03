@@ -28,6 +28,8 @@ import os
 import re
 from collections import defaultdict
 
+import nwnlib as n
+
 INCLUDE_LIMIT = 64                # the nesting limit this check uses (see the module docstring)
 IDENTIFIER_LIMIT = 16384          # EE raised the compiler's identifier table from 8K (nwn.wiki, Major Changes in EE)
 # A declaration that starts in column 0: optional const, a type, then the declared name followed by =, ; or (.
@@ -60,13 +62,34 @@ def resref_case(db):
                         "GetStringLowerCase(GetResRef(o)).")]
 
 
+def _base_portrait_names(db):
+    """The BaseResRef values (lower case) of the game's own portraits.2da, from the install recorded in the index (meta
+    nwn_root); None without one or when it can't be read (then every row is judged, as before). A value the game's own
+    table lists is the game's business wherever a copy puts it - the game ships rows for portraits that were cut or
+    never made (ghost_, xaribethe_ ...), and a copy that inserts a row only shifts them. Never raises."""
+    try:
+        row_ = db.execute("SELECT value FROM meta WHERE key='nwn_root'").fetchone()
+        if not row_ or not row_[0]:
+            return None
+        data = n.BaseGame(row_[0]).get("portraits.2da")
+        if not data:
+            return None
+        t = n.read_2da(n.decode_text(data))
+        col = next((i for i, c in enumerate(t.columns) if c.lower() == "baseresref"), None)
+        if col is None:
+            return None
+        return {(vals[col] or "").lower() for _label, vals in t.rows if col < len(vals) and vals[col]}
+    except Exception:  # noqa - a damaged or missing install only means nothing to compare with
+        return None
+
+
 def portraits(db, all_names):
     """portrait_prefix and portrait_files warnings.
 
     db: the analysis index, sqlite3.Connection. all_names: set of "resref.ext" names available anywhere (module, haks,
     override, base game). Checks the Portrait field of the module's creatures (.utc) and characters (.bic): the first
-    50 get an issue each, then one more issue says how many others there are. Also every BaseResRef row of each
-    portraits.2da in the index. Read-only."""
+    50 get an issue each, then one more issue says how many others there are. Also the BaseResRef rows of the
+    portraits.2da players get whose value the game's own table doesn't list (_base_portrait_names). Read-only."""
     out = []
     sid = _module_sid(db)
     # In SQL LIKE "_" matches any one character, so it is escaped ('po\_%') to mean a literal "po_" prefix.
@@ -82,22 +105,43 @@ def portraits(db, all_names):
         out.append(dict(severity="warning", category="portrait_prefix", node="module", label="module",
                         detail=f"{len(bad) - 50} more creature(s)/character(s) have a portrait that doesn't start "
                                f"with po_ ({len(bad)} in all; only the first 50 are listed above)"))
-    # custom portraits.2da rows whose textures are missing
-    rows = db.execute("SELECT t.row, t.value FROM twoda t JOIN files f ON f.id=t.file_id "
-                      "WHERE t.name='portraits' AND t.col='BaseResRef'").fetchall()
-    missing = []
+    # portraits.2da rows whose textures are missing - in the copy players get (the first-listed hak's, else the
+    # module's: nwnlib.source_rank; an override folder's copy is the builder's or the server's, never the players'),
+    # leaving out values the game's own table lists (_base_portrait_names; a tester's report)
+    win = db.execute("SELECT f.id FROM files f JOIN sources s ON s.id=f.source_id WHERE lower(f.resref)='portraits' "
+                     f"AND f.ext='2da' AND s.kind IN ('hak', 'module') ORDER BY {n.source_rank_sql()}, s.id "
+                     "LIMIT 1").fetchone()
+    rows = db.execute("SELECT row, value FROM twoda WHERE file_id=? AND name='portraits' AND lower(col)='baseresref' "
+                      "ORDER BY CAST(row AS INTEGER)", (win[0],)).fetchall() if win else []
+    game = _base_portrait_names(db) if rows else None
+    missing, seen = [], set()
     for row, base in rows:
+        if row in seen:                    # a table with two BaseResRef columns: the first one counts, once per row
+            continue
+        seen.add(row)
         if not base or base == "****":    # "****" is the 2da notation for an empty cell
             continue
         b = base.lower()
+        if game is not None and b in game:
+            continue
         # the game appends a size letter (h, l, m, s, t) to po_<BaseResRef>; any one of them counts as present
         if not any(f"po_{b}{sz}.{e}" in all_names for sz in "hlmst" for e in ("tga", "dds")):
             missing.append((row, b))
     if missing:
-        out.append(dict(severity="warning", category="portrait_files", node="2da:portraits", label="portraits.2da",
-                        detail=f"{len(missing)} portrait row(s) have no po_<name><size> texture in the module, haks, "
-                               f"override or game (e.g. " + ", ".join(f"row {r} {b}" for r, b in missing[:6]) +
-                               "): those portraits show blank"))
+        import json
+        try:
+            gone = json.loads((db.execute("SELECT value FROM meta WHERE key='haks_missing'").fetchone() or ["[]"])[0])
+        except ValueError:
+            gone = []
+        detail = (f"{len(missing)} portrait row(s) have no po_<name><size> texture in the module, haks, override or "
+                  f"game (e.g. " + ", ".join(f"row {r} {b}" for r, b in missing[:6]) + "): those portraits show blank")
+        if game is None:
+            detail += (" (the game's own portraits.2da couldn't be read, so rows the game itself ships are included - "
+                       "set the NWN install folder in Settings)")
+        if gone:
+            detail += f" ({len(gone)} hak(s) not loaded - the pictures, or the copy of the table the game uses, may be there)"
+        out.append(dict(severity="info" if gone else "warning", category="portrait_files", node="2da:portraits",
+                        label="portraits.2da", detail=detail))
     return out
 
 

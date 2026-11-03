@@ -2513,9 +2513,27 @@ def run_analysis(out_dir, verbose=True):
     nwn_progress.stage("analysis", "Analysis: variables, tags and token slots")
     try:
         import nwn_varaudit
-        var_audit = nwn_varaudit.run(db, g)
+        # scripts Safe to delete keeps as Review (reasons the graph can't follow) may still run (second adversarial pass)
+        may_run = {d["node"]: (d.get("reason") or "kept as Review").split(";")[0][:80] for d in deletions
+                   if d.get("type") == "script" and d.get("status") == "Review"}
+        var_audit = nwn_varaudit.run(db, g, live, may_run)
         for li in nwn_varaudit.issues_from(var_audit, len(haks_missing or ())):
             issues.append(li)
+        # a tag no file carries but a script gives an object while the game runs (CreateObject / CopyObject /
+        # CreateItemOnObject's new tag, SetTag): the lookup works, so unknown_tag is a note naming the script, the
+        # same verdict the Variables & tags page gives (a tester's report: the two pages disagreed)
+        # (only scripts something runs count: nwn_varaudit.audit_tags). The detail keeps its original start - the
+        # part before "; used by" is the issue's signature, so an issue accepted as by design stays accepted and the
+        # build audit compares like with like - and adds the giver after it. node is "tag:<the exact tag>".
+        given = {t["tag"]: t["detail"] for t in var_audit.get("tags", []) if t.get("status") == "runtime"}
+        dead = {t["tag"]: t["detail"] for t in var_audit.get("tags", []) if t.get("status") == "runtime_unused"}
+        for i in issues:
+            tag_ = i["node"][4:]
+            if i["category"] == "unknown_tag" and i["severity"] == "warning" and tag_ in given:
+                i["severity"] = "info"
+                i["detail"] += f" - the tag is {given[tag_]}, so the lookup works once that has run"
+            elif i["category"] == "unknown_tag" and i["severity"] == "warning" and tag_ in dead:
+                i["detail"] += f" - the tag is {dead[tag_]}"     # stays a warning: those scripts never run
     except Exception as ex:  # noqa - an audit must never stop the analysis
         var_audit = dict(summary=dict(error=f"variable/tag audit failed: {ex}"), variables=[], tags=[], tokens=[])
         if verbose:
@@ -2694,7 +2712,7 @@ def run_analysis(out_dir, verbose=True):
                   # held when analysed, so the page can tell "loaded since - Analyse again"
                   db_named=[dict(node=k, label=g.label(k)) for k in db_named[:5000]], db_named_count=len(db_named),
                   db_words=len(db_words), db_words_sig=words_signature(db_words),
-                  same_stats_rules=1, locstring_rules=locstring_rules, locstring_counts=locstring_counts,
+                  same_stats_rules=1, runtime_tag_rules=1, locstring_rules=locstring_rules, locstring_counts=locstring_counts,
                   map_summary=map_summary,
                   asset_duplicates=asset_dups, deletions=deletions, areas=areas, conversations=convs, conversation_dynamic_starts=dyn_starts[:300], quests=quests,
                   inferred_quests=inferred, var_audit=var_audit, pw_performance=pw_perf, factions=factions, databases=databases,

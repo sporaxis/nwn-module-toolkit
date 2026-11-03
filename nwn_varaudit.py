@@ -10,7 +10,8 @@ variables builders type into the toolset (the VarTable of blueprints, placed obj
   case_twin        the same name with different capital letters (variable names are case-sensitive)
   similar_name     read-never-set name one letter away from a name that is set (a typo?)
 Tags looked up by scripts (GetObjectByTag, GetWaypointByTag, GetNearestObjectByTag, GetItemPossessedBy ...):
-  placed / spawned / runtime (created with a new tag or SetTag) / blueprint_only / case_twin / missing
+  placed / spawned / runtime (a script that something runs gives the tag: NEW_TAG_ARG) / runtime_unused (only scripts
+  nothing runs give it) / blueprint_only / case_twin / missing
 Token slots (a module's own helper pair, e.g. SetQuestToken / GetQuestToken): every slot of the token string, the names that use it, who sets and
 who reads it, and the free slots.
 
@@ -42,8 +43,13 @@ EXTRA_GET = {"GetLocalObject": "object", "GetLocalLocation": "location"}
 EXTRA_DEL = {"DeleteLocalObject": "object", "DeleteLocalLocation": "location"}
 # Functions that give an object a tag at run time -> index of that tag argument:
 # CreateObject(type, resref, location, appear animation, NEW TAG), CopyObject(object, location, owner, NEW TAG),
-# SetTag(object, NEW TAG). CopyItemAndModify has no tag argument (None), so it is not scanned.
-NEW_TAG_ARG = {"CreateObject": 4, "CopyObject": 3, "SetTag": 1, "CopyItemAndModify": None}
+# CreateItemOnObject(resref, target, stack size, NEW TAG) - its sNewTag, from nwscript.nss; a tester's module gives
+# items their tag this way - and SetTag(object, NEW TAG). CopyItemAndModify has no tag argument (None), so it is not
+# scanned.
+NEW_TAG_ARG = {"CreateObject": 4, "CopyObject": 3, "CreateItemOnObject": 3, "SetTag": 1, "CopyItemAndModify": None,
+               # from nwscript.nss (EE 37): CreateTrapAtLocation(type, location, size, TAG, ...), CreateArea(resref,
+               # NEW TAG, ...), CopyArea(area, NEW TAG, ...) - an independent review's list
+               "CreateTrapAtLocation": 3, "CreateArea": 1, "CopyArea": 1}
 MAX_REFS = 8        # example references kept per variable / tag / slot (counts stay complete): keeps report.json small
 
 
@@ -249,12 +255,16 @@ def audit_variables(qi, facts, toolset):
     return out
 
 
-def audit_tags(db, g, qi):
+def audit_tags(db, g, qi, live=None, may_run=None):
     """One row per tag that a script looks up, with whether anything in the module can carry that tag.
 
     db: the analysis index (read-only); g: the dependency graph (g.rev says whether a blueprint is spawned, sold
     or carried) or None (then a blueprint-only tag is reported as such, since nothing shows it reachable); qi: the
-    _AuditInference (its comment-free code, for run-time tags). Status: placed / runtime / spawned are ok; blueprint_only, case_twin and missing are warnings,
+    _AuditInference (its comment-free code, for run-time tags); live: node ids the analysis found reachable, or None
+    (then every script counts as run); may_run: {script node: reason} for scripts the graph can't reach but Safe to
+    delete keeps as Review (run by a name built at run time, NWNX, a DM palette, a hak not loaded) - they count as
+    giving the tag, and the detail says they may run. Status: placed / runtime / spawned are ok; runtime_unused (the only scripts that
+    give the tag are ones nothing runs), blueprint_only, case_twin and missing are warnings,
     because the lookup returns OBJECT_INVALID and the script's action on it usually does nothing, without an error."""
     placed, bp_tags = defaultdict(int), defaultdict(set)
     examples = defaultdict(list)          # tag -> up to 3 nodes carrying it (to name a case twin's holders)
@@ -275,15 +285,27 @@ def audit_tags(db, g, qi):
                              "AND fi.path='Tag'" + (" AND f.source_id=?" if sid else ""), (sid[0],) if sid else ()):
         if tag:
             placed[tag] += 1
-    # tags given at run time: CreateObject(..., "NEWTAG"), CopyObject(..., "NEWTAG"), SetTag(o, "NEWTAG")
-    runtime = defaultdict(list)
+    # tags given at run time (NEW_TAG_ARG: CreateObject / CopyObject / CreateItemOnObject's new tag, SetTag ...).
+    # Only a script something runs counts (a tester's review: a dead script's SetTag made a broken lookup look fine);
+    # the others are kept apart so the finding can name them
+    runtime, runtime_dead = defaultdict(list), defaultdict(list)
     for script, code in qi.code.items():
-        for fn, args, s, _e in nwn_quests.iter_calls(code, {k for k, v in NEW_TAG_ARG.items() if v is not None}):
-            i = NEW_TAG_ARG[fn]
-            if len(args) > i:
-                v = qi.resolve(args[i])
-                if v:
-                    runtime[v].append(script)
+        qi._cur_script = script          # constants resolve to the definition THIS script includes
+        try:
+            for fn, args, s, _e in nwn_quests.iter_calls(code, {k for k, v in NEW_TAG_ARG.items() if v is not None}):
+                i = NEW_TAG_ARG[fn]
+                if len(args) > i:
+                    v = qi.resolve(args[i])
+                    if v:
+                        nd = f"script:{script}"
+                        if live is None or nd in live:
+                            runtime[v].append(script)
+                        elif may_run and nd in may_run:
+                            runtime[v].append(f"{script} (may run: {may_run[nd]})")
+                        else:
+                            runtime_dead[v].append(script)
+        finally:
+            qi._cur_script = None
 
     def obtainable(bp_node):
         """Does anything spawn this blueprint, hold it in an inventory/store, or use it as a template?
@@ -301,7 +323,7 @@ def audit_tags(db, g, qi):
         """A node's readable label (the graph's) or the node id when there is no graph."""
         return g.label(nd) if g is not None else nd
     lower_all = defaultdict(set)
-    for t in list(placed) + list(bp_tags) + list(runtime):
+    for t in list(placed) + list(bp_tags) + list(runtime) + list(runtime_dead):
         lower_all[t.lower()].add(t)
     out = []
     for tag, d in lookups.items():
@@ -309,6 +331,10 @@ def audit_tags(db, g, qi):
             status, level, text = "placed", "ok", f"{placed[tag]} placed object(s)/area(s) have this tag"
         elif tag in runtime:
             status, level, text = "runtime", "ok", "given to an object at run time by " + ", ".join(sorted(set(runtime[tag]))[:3])
+        elif tag in runtime_dead and tag not in bp_tags:
+            status, level, text = "runtime_unused", "warning", (
+                "only given at run time by script(s) nothing runs: " + ", ".join(sorted(set(runtime_dead[tag]))[:3])
+                + " - the lookup finds nothing unless something starts one of them")
         elif tag in bp_tags:
             nodes = sorted(bp_tags[tag])
             if any(obtainable(n) for n in nodes):
@@ -423,11 +449,13 @@ def audit_tokens(qi, facts):
     return result
 
 
-def run(db, g):
+def run(db, g, live=None, may_run=None):
     """Run the variable, tag and token-slot audits.
 
     db: the analysis index (sqlite3.Connection), read-only; g: the analysis dependency graph (used for script
-    triggers and for blueprint reachability in audit_tags), or None for a run without either.
+    triggers and for blueprint reachability in audit_tags), or None for a run without either. live: the analysis'
+    reachable node ids (a script that gives a tag counts only when it is among them, or in may_run - see audit_tags),
+    or None.
     Returns dict(summary, variables, tags, tokens).
     Writes nothing; nwn_analysis stores the result in report.json -> var_audit and catches any exception."""
     scripts = nwn_quests.winning_sources(db)
@@ -438,7 +466,7 @@ def run(db, g):
     qi.scan_definitions()
     facts = qi.facts()
     variables = audit_variables(qi, facts, toolset_variables(db))
-    tags = audit_tags(db, g, qi)
+    tags = audit_tags(db, g, qi, live, may_run)
     tokens = audit_tokens(qi, facts)
 
     def cnt(rows, key):

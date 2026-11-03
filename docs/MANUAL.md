@@ -565,7 +565,7 @@ language, accept it as by design.
 | Category | What it means | What to do |
 |---|---|---|
 | `resref_case` | Blueprint names with capital letters. In EE, `GetResRef()` returns the name exactly as typed (1.69 returned lower case), so a script comparing it with lower-case text stops matching | Rename to lower case, or compare with `GetStringLowerCase(GetResRef(o))` |
-| `portrait_prefix` / `portrait_files` | A creature portrait that doesn't start with `po_`, or a `portraits.2da` row whose `po_<name><size>` pictures don't exist anywhere | Fix the name, or add the pictures to a hak |
+| `portrait_prefix` / `portrait_files` | A creature portrait that doesn't start with `po_`, or a row of the `portraits.2da` the game uses whose `po_<name><size>` pictures don't exist anywhere. Only the copy players get is read (a hak's or the module's, never an override folder's), and portraits the game's own table lists are left out (it lists some that were never shipped) when the NWN install folder is set; with a hak not loaded it is a note | Fix the name, or add the pictures to a hak |
 | `area_tag` | An area with an empty tag (error: reported to crash saved-character reloads on a persistent world) or several areas sharing a tag (`GetObjectByTag` only finds one) | Give each area its own tag |
 | `include_depth` | An `#include` chain close to or over the compiler's limit of 64 | Flatten the chain |
 | `identifier_load` | A script whose includes bring in close to the compiler's limit of names (about 16,000 in EE; an approximate count) | Split the big include library |
@@ -937,7 +937,9 @@ Three tabs, also in `reports/variables.csv`, `tag_lookups.csv` and `token_slots.
   - *set, never read* (info).
 - **Tags looked up**: every tag the scripts look up by name (`GetObjectByTag`, `GetWaypointByTag`, `GetNearestObjectByTag`,
   `GetItemPossessedBy`…). Statuses: *placed*, *spawned/sold at run time* (only on a blueprint that is spawned, sold or
-  carried), *tag given at run time* (`CreateObject(…, "NEWTAG")`, `SetTag`), *only on an unused blueprint* (the lookup
+  carried), *tag given at run time* (`CreateObject(…, "NEWTAG")`, `CreateItemOnObject(…, "NEWTAG")`, `CopyObject`, `SetTag`;
+  on the Issues page such a lookup is a note naming the script, not a warning - but only when something runs that
+  script: a tag only a script nothing runs gives stays a warning that names it), *only on an unused blueprint* (the lookup
   finds nothing), *capital letters differ* (tags are case-sensitive), *no such tag*.
 - **Token slots**: every slot of the module's quest-token string(s) with a coloured map. For each slot: the names that
   use it, the values set, who sets it and who reads it, and statuses *used*, *shared* (two names on one slot), *read,

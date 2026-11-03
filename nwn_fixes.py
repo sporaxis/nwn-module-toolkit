@@ -127,6 +127,12 @@ def _missing_conversation(i):
 
 def _unknown_tag(i):
     nm = _first(i.get("detail", ""), "the tag")
+    if "given at run time by script(s) nothing runs" in i.get("detail", ""):
+        return ("The script that gives this tag is not in use (nothing runs it), so the lookup finds nothing. Hook "
+                "that script up to the event that should run it, or give the object the tag in the toolset.")
+    if "given to an object at run time" in i.get("detail", ""):
+        return ("Nothing to fix if that script runs before the lookup (it gives the object its tag). If the lookup can "
+                "run first, it finds nothing - check the order of events.")
     return (f"Check the tag spelling (tags are case-sensitive) with Find & replace on '{nm}'. If the object is created "
             "while the game runs, this is fine - tick By design. Otherwise give the object that tag, or fix the "
             "GetObjectByTag call.")

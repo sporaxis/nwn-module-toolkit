@@ -124,6 +124,9 @@ REANALYSE = [
     dict(key="locstring_rules", since="1.5.9",
          what="Text fields holding both a talk-table number and their own text (wrong text for other game languages); "
               "fewer false 'stale compiled script' and 'not compiled' warnings"),
+    dict(key="runtime_tag_rules", since="1.5.10",
+         what="Tag lookups of tags a script gives at run time (CreateItemOnObject, SetTag...) as notes, and portrait "
+              "rows the game itself ships left out"),
 ]
 
 # --- (a) bringing work across -------------------------------------------------------------------------------

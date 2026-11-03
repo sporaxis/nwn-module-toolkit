@@ -1,1 +1,1 @@
-vault 1.5.9 8dc867b
+vault 1.5.10 7596fbb
