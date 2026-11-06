@@ -127,6 +127,9 @@ REANALYSE = [
     dict(key="runtime_tag_rules", since="1.5.10",
          what="Tag lookups of tags a script gives at run time (CreateItemOnObject, SetTag...) as notes, and portrait "
               "rows the game itself ships left out"),
+    dict(key="library_include_rules", since="1.5.11", value=2,
+         what="Include libraries judged by the scripts that compile with them (no missing-include errors for "
+              "libraries whose users include what they need); fewer false stale compiled scripts"),
 ]
 
 # --- (a) bringing work across -------------------------------------------------------------------------------

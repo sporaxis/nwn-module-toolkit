@@ -1781,8 +1781,10 @@ const issueKey = i => `${i.category}|${i.node}|${i.label}`;
 // the signature stops at "; used by ": accepting a missing script covers every object that names it, even ones added
 // later (nwn_sheets.issue_sig); a signature stored before that rule is cut the same way, so it still matches
 // both cut to 4000 characters, the length the server stores (nwn_sheets.SIG_MAX), after the numbers are masked
-const sigCore = s => String(s || "").split("; used by ")[0].slice(0, 4000);
-const issueSig = i => String(i.detail || "").split("; used by ")[0].replace(/\d+/g, "#").slice(0, 4000);
+const sigCore = s => maskLibs(String(s || "").split("; used by ")[0]).slice(0, 4000);
+// a missing include's quoted library names are masked (nwn_sheets.mask_libs): which definer is named can change
+const maskLibs = t => t.startsWith("calls ") ? t.replace(/'[^']*'(?: or '[^']*')*/g, "'*'") : t;
+const issueSig = i => maskLibs(String(i.detail || "").split("; used by ")[0]).replace(/\d+/g, "#").slice(0, 4000);
 // One key can hold several accepted issues (a script missing two includes has two missing_include issues): an entry
 // keeps them all in "sigs" ({signature: {note}}); entries saved before 1.5.7 have just "sig" (nwn_sheets.sigs_of).
 // (an object with no prototype, so a detail that happens to read "toString" is never "accepted")

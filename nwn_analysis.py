@@ -842,6 +842,13 @@ def _script_found(g, name):
 
 
 # the index's detail for an include no loaded source has (nwn_index: '#include "x" not found in module (line 5)')
+LACKING_MAX = 200      # names kept in a library finding's `lacking` list (lacking_count has them all)
+# A place in a script's text is line * POS_LINE + column: "int Fn(); int G() { return Fn(); }" declares Fn before
+# the call on the same line (the official compiler accepts it; a third adversarial pass)
+POS_LINE = 1 << 20
+LACKING_FILE = "library_lacking.json"   # {lacking_key: every name}, written beside report.json
+
+
 def PROTOTYPE_RE(fn):
     """Regex for a prototype of function `fn` in NWScript source: a type, the name, a parameter list and ";" with no
     body (a declaration only; the definition lives in another include). Used by the missing_include check."""
@@ -1528,21 +1535,179 @@ def run_analysis(out_dir, verbose=True):
     defined_in = defaultdict(list)     # every script that defines a function (two token systems can share names)
     for name, defined in db.execute("SELECT name, functions_defined FROM scripts"):
         for fn in (defined or "").split(","):
-            if fn and fn != "main" and fn != "StartingConditional":
-                defined_in[fn].append(name)
+            if fn and fn != "main" and fn != "StartingConditional" and name not in defined_in[fn]:
+                defined_in[fn].append(name)          # once per script name, however many copies define it
+    # the library to name first: include libraries before scripts with a main() (an unused test script that defines a
+    # helper of the same name is no include to add), then by name - stable, so the finding's text is too
+    runnable_names = {nm_ for nm_, m_, sc_ in db.execute("SELECT name, has_main, has_sc FROM scripts") if m_ or sc_}
+    for fn in defined_in:
+        defined_in[fn].sort(key=lambda x_: (x_ in runnable_names, x_))
+    # include edges once, in the order of their #include lines ("line N" in the edge's via): the compiler pastes
+    # each include where its line is, the first time it is met (EE: a file already pasted is skipped)
+    # the copy of each script that is judged: the one the toolset compiles and players get (first-listed hak, then the
+    # module - nwnlib.source_rank); an override or base-game copy only when no hak/module copy exists (the builder's
+    # override folder is not what players have - the build and its audit leave it out too)
+    win_fid = {}
+    for nm_, fid_ in db.execute("SELECT sc.name, sc.file_id FROM scripts sc JOIN files f ON f.id=sc.file_id "
+                                "JOIN sources s ON s.id=f.source_id ORDER BY s.kind NOT IN ('hak','module'), "
+                                f"{n.source_rank_sql()}, s.id, sc.file_id"):
+        win_fid.setdefault(nm_, fid_)
+    # each script's #include lines, from THAT copy, in line order (the index's include edges merge every copy's lines:
+    # an override copy that includes more must not make the module's copy look fine - second adversarial pass); and
+    # where it declares (prototype) or defines each function, by place - the compiler accepts a call once either
+    # comes earlier in the pasted text
+    inc_children, own_decl, func_calls = defaultdict(list), defaultdict(dict), defaultdict(dict)
+    first_calls, global_calls, lacking_full = {}, {}, {}
+    proto_any = re.compile(r"^[ \t]*(?:const\s+)?(?:int|float|string|object|void|vector|location|effect|event|talent|"
+                           r"itemproperty|action|json|cassowary|sqlquery|struct\s+\w+)\s+(\w+)\s*\([^;{)]*\)\s*[;{]",
+                           re.M)
+    for fid_, nm_, src_ in db.execute("SELECT file_id, name, source FROM scripts"):
+        if win_fid.get(nm_) != fid_ or not src_:
+            continue
+        code_, incs_, _l = nwn_index.lex_nss(src_)
+        inc_children[nm_] = sorted(incs_)
+        bare_ = nwn_index.STRING_LIT_RE.sub('""', code_)
+        blank_names, blank_all = list(bare_), list(bare_)   # copies with header names / also bodies blanked
+        for m_ in proto_any.finditer(bare_):
+            ln0_ = bare_.count("\n", 0, m_.start(1)) + 1
+            own_decl[nm_].setdefault(m_.group(1), ln0_ * POS_LINE + m_.start(1) - (bare_.rfind("\n", 0, m_.start(1)) + 1))
+            # only the declared NAME is no call ("int Fn(); int G() { return Fn(); }" on one line still calls Fn)
+            for k_ in range(m_.start(1), m_.end(1)):
+                blank_names[k_] = blank_all[k_] = " "
+            if bare_[m_.end() - 1] == "{":
+                # the definition's body (to its matching "}"): the names it calls, for reach_calls below
+                depth, j_ = 0, m_.end() - 1
+                while j_ < len(bare_):
+                    depth += {"{": 1, "}": -1}.get(bare_[j_], 0)
+                    if depth == 0:
+                        break
+                    j_ += 1
+                func_calls[nm_].setdefault(m_.group(1), set(re.findall(r"\b([A-Za-z_]\w*)\s*\(",
+                                                                       bare_[m_.end():j_])))
+                for k_ in range(m_.end(), min(j_, len(bare_))):
+                    if blank_all[k_] != "\n":
+                        blank_all[k_] = " "
+        # the first line calling each name (call_line), and the calls outside any function: a global initialiser
+        # ("int g = Fn();") is compiled whether or not main() runs anything (the official compiler, a third pass)
+        fc_, text_ = {}, "".join(blank_names)
+        for k_, ln_ in enumerate(text_.split("\n"), 1):
+            for m_ in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", ln_):
+                fc_.setdefault(m_.group(1), k_ * POS_LINE + m_.start())
+        first_calls[nm_] = fc_
+        global_calls[nm_] = set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", "".join(blank_all)))
+
+    def includes_reached(nm):
+        """Every script nm #includes, directly or through other includes (names without "script:")."""
+        reach, stack = set(), [c for _l, c in inc_children.get(nm, ())]
+        while stack:
+            x_ = stack.pop()
+            if x_ in reach:
+                continue
+            reach.add(x_)
+            stack += [c for _l, c in inc_children.get(x_, ())]
+        return reach
+
+    def paste_paths(nm):
+        """{include: path} for every script the compiler pastes into nm. NWScript pastes an include's text where its
+        #include line is, the first time the file is met (a file met again is skipped). A path is the tuple of
+        #include line numbers from nm down to the file: (3, 2) = pasted at line 2 of the include at nm's line 3. Line
+        L of that file then sits at path + (L,), and comparing such tuples gives their order in the pasted text
+        ((3, 1) comes before (3, 2, 7), which comes before (4,)). Each number is a place (line * POS_LINE + column),
+        so two things on one line are ordered too. Iterative (deep chains); never raises."""
+        paths, seen = {}, {nm}
+        stack = [((), iter(inc_children.get(nm, ())))]
+        while stack:
+            base, it = stack[-1]
+            nxt = next(it, None)
+            if nxt is None:
+                stack.pop()
+                continue
+            line_, c = nxt
+            if c in seen:
+                continue
+            seen.add(c)
+            paths[c] = base + (line_ * POS_LINE,)
+            stack.append((paths[c], iter(inc_children.get(c, ()))))
+        return paths
+    # an include library may call a function another library defines without including it: NWScript pastes includes
+    # into the script being compiled, so what counts is whether each script that compiles (main/StartingConditional)
+    # and includes the library has the function declared or defined ABOVE the library's call in the pasted text -
+    # a tester's module: 545 "missing include" errors on an AI library whose scripts all compile; an independent
+    # review: the wrong order does not compile. Checked against the official compiler on random include layouts
+    # with prototypes (two adversarial passes). users_of: library -> the compiling scripts that reach it
+    users_of, closure_of, paths_of, first_unread = defaultdict(set), {}, {}, {}
+    for nm_, m_, sc_ in db.execute("SELECT DISTINCT name, has_main, has_sc FROM scripts"):
+        if (m_ or sc_) and nm_ not in paths_of:
+            paths_of[nm_] = paste_paths(nm_)
+            closure_of[nm_] = set(paths_of[nm_])
+            for x_ in closure_of[nm_]:
+                users_of[x_].add(nm_)
+            # the earliest-pasted include that isn't in the module (its contents are unknown), once per script
+            ur = [p_ for x_, p_ in paths_of[nm_].items() if not g.nodes.get(f"script:{x_}", {}).get("in_module")]
+            if ur:
+                first_unread[nm_] = min(ur)
+    def call_line(nm, fn):
+        """The first line of script nm (the judged copy) that calls fn - a function's declared name ("int Fn(...);"
+        or a definition's header) is no call. None when none does. Never raises."""
+        return first_calls.get(nm, {}).get(fn)
+
+    declared_by = defaultdict(list)     # function -> [(script, line)] of every judged copy declaring or defining it
+    for x_, d_ in own_decl.items():
+        for f_, ln_ in d_.items():
+            declared_by[f_].append((x_, ln_))
+    reach_cache = {}
+
+    def reach_calls(u):
+        """Every name called by a function that compiling script u can run: from its main()/StartingConditional()
+        through the functions defined in what it pastes (the first definition met wins). Cached; never raises."""
+        if u not in reach_cache:
+            fdefs = {}
+            for x_ in [u] + sorted(paths_of[u], key=paths_of[u].get):
+                for f_, callees in func_calls.get(x_, {}).items():
+                    fdefs.setdefault(f_, callees)
+            # from main()/StartingConditional() and every global initialiser of what u pastes
+            out = set().union(*(global_calls.get(x_, set()) for x_ in [u] + list(paths_of[u])))
+            todo = [f_ for f_ in ("main", "StartingConditional") if f_ in fdefs]
+            todo += [f_ for f_ in out if f_ in fdefs and f_ not in todo]
+            seen_f = set(todo)
+            while todo:
+                for c_ in fdefs.get(todo.pop(), ()):
+                    out.add(c_)
+                    if c_ in fdefs and c_ not in seen_f:
+                        seen_f.add(c_)
+                        todo.append(c_)
+            reach_cache[u] = out
+        return reach_cache[u]
+
+    def declared_above(u, lib, fn):
+        """Is fn declared or defined above lib's first call to it in what script u pastes (lib may be u itself)?"""
+        paths = paths_of.get(u, {})
+        if lib != u and lib not in paths:
+            return False
+        at = (paths[lib] if lib != u else ()) + (call_line(lib, fn) or 0,)
+        return any((paths[x_] if x_ != u else ()) + (ln_,) < at for x_, ln_ in declared_by.get(fn, ())
+                   if x_ == u or x_ in paths)
+
+    def user_has(u, lib, fn, defs):
+        """Does script u compile with library lib's call to fn? The official compiler (checked on random include
+        layouts with prototypes) needs fn declared or defined ABOVE the call in the pasted text - otherwise a parse
+        error, whether or not anything runs the call - and, for a function only declared ("int Fn();"), a definition
+        somewhere in what u pastes when anything u's main() can run calls it (UNDEFINED IDENTIFIER). Never raises."""
+        if not declared_above(u, lib, fn):
+            return False
+        return bool(defs & (closure_of[u] | {u})) or fn not in reach_calls(u)
     for (fid, name, has_main, has_sc, lines, nh, has_ncs, src, header, defined, calls) in \
             db.execute("SELECT * FROM scripts"):
+        if win_fid.get(name, fid) != fid:
+            continue                    # another copy of a script the game loads from elsewhere: judged once
         own = set((defined or "").split(","))
         nid = f"script:{name}"
         # reach_inc: every script this one #includes, directly or through other includes (names without "script:")
-        reach_inc = set()
-        stack = [d_[7:] for d_, k, v in g.fwd.get(nid, []) if k == "include"]
-        while stack:
-            x_ = stack.pop()
-            if x_ in reach_inc:
-                continue
-            reach_inc.add(x_)
-            stack += [d_[7:] for d_, k, v in g.fwd.get(f"script:{x_}", []) if k == "include"]
+        reach_inc = closure_of[name] if name in closure_of else includes_reached(name)
+        # a name that only appears declared ("int Fn();" with no call) is no call: the compiler doesn't need its body
+        # (an adversarial pass's random layouts, checked with the official compiler)
+        calls = json.dumps({fn: c_ for fn, c_ in json.loads(calls or "{}").items()
+                            if fn not in defined_in or fn in own or call_line(name, fn)})
         # A call to a function another module script defines needs that script in the include chain; otherwise
         # the official compiler fails (or the function comes from a base-game/hak include we could not read).
         lib_calls, missing_inc = [], []
@@ -1557,16 +1722,67 @@ def run_analysis(out_dir, verbose=True):
                 else:
                     missing_inc.append((fn, libs[0] if len(libs) == 1 else "' or '".join(libs[:3])))
         lib_calls.sort()
+        cleared = set()                 # library calls every compiling user is fine with (not a problem to describe)
+        via_users = {}                  # those calls by the library that defines them (one note, below)
         for fn, lib in missing_inc:
             ncs_note = " A compiled .ncs of this script is in the module, so it compiled at some point." if has_ncs else ""
-            if not has_main and not has_sc and PROTOTYPE_RE(fn).search(src or ""):
+            defs = set(defined_in.get(fn, ()))
+            users = sorted(users_of.get(name, ()))
+            lacking = [u for u in users if not user_has(u, name, fn, defs)] if not has_main and not has_sc else []
+            if not has_main and not has_sc and PROTOTYPE_RE(fn).search(src or "") and not lacking:
                 # an include that declares the function's prototype and leaves the body to whoever includes it (HCR's
                 # hc_i2_* libraries: "int GFA(string sFeature);" - the main script includes hc_i0_all too). NWScript
-                # compiles that fine, so it is a note (a tester's module, 2026-10-30: six such errors)
+                # compiles that fine, so it is a note (a tester's module, 2026-10-30: six such errors) - as long as each
+                # script that compiles with it pastes a definition too; one that doesn't is judged below like any
+                # library (the compiler: UNDEFINED IDENTIFIER - an adversarial pass's random layouts)
                 issues.append(dict(severity="info", category="missing_include", node=nid, label=g.label(nid),
                                    detail=f"calls {fn}() and declares it ('{fn}(...);' without a body) instead of "
                                           f"including '{lib}', which defines it: the script that includes this one must "
                                           f"include '{lib}' as well (a library convention, fine as it is).{ncs_note}"))
+                continue
+            if not has_main and not has_sc:
+                # a library: judged by the scripts that compile with it (users_of) - each must have a library that
+                # declares or defines fn above this library's call (paths_of). All do: fine, nothing to report. Some don't: one issue
+                # naming them; none uses it: a note. The detail starts like a script's own missing include (its
+                # signature, so earlier "by design" ticks and the build audit compare like with like) and names the
+                # scripts after "; used by"; `lacking` lists them all, for the audit's "did it get worse" rule.
+                if users and not lacking:
+                    lib_calls.append(f"{fn}() from {lib} (every script that includes this one includes it first)")
+                    cleared.add(fn)
+                    via_users.setdefault(lib, []).append(fn)
+                    continue
+                if users:
+                    live_lacking = [u for u in lacking if f"script:{u}" in live]
+                    # a lacking script that pastes an include not in the module (base game, a hak not loaded) BEFORE
+                    # the library may get the function from it; one pasted after can't help
+                    # (with fn declared above the call, an unread include anywhere may hold its definition)
+                    unread_u = [u for u in lacking if name in paths_of[u] and u in first_unread and (
+                                first_unread[u] < paths_of[u][name] or declared_above(u, name, fn))]
+                    sev = "error" if live_lacking and set(live_lacking) - set(unread_u) else "info"
+                    if sev == "info":
+                        cleared.add(fn)       # the Scripts page doesn't call it a compile error either
+                    why = ("" if sev == "error" else " (only scripts nothing runs, or ones that reach an include not "
+                           "in the module that may define it)")
+                    lacking_full[f"{nid}|{fn}"] = lacking      # the whole list, for the build audit (LACKING_FILE)
+                    issues.append(dict(severity=sev, category="missing_include", node=nid, label=g.label(nid),
+                                       lacking=lacking[:LACKING_MAX], lacking_count=len(lacking),
+                                       lacking_key=f"{nid}|{fn}",
+                                       detail=f"calls {fn}() which is defined in '{lib}' but does not #include it (will "
+                                              f"not compile unless the function exists elsewhere).{ncs_note}; used by "
+                                              f"{len(lacking)} of the {len(users)} script(s) that include this library "
+                                              f"without '{lib}' before it{why}: {', '.join(lacking[:5])}"
+                                              + (" ..." if len(lacking) > 5 else "")))
+                    continue
+                issues.append(dict(severity="info", category="missing_include", node=nid, label=g.label(nid),
+                                   detail=f"calls {fn}() which is defined in '{lib}' and does not #include it; no "
+                                          f"script that compiles includes this library, so nothing breaks today - a "
+                                          f"script that includes it must include '{lib}' too."))
+                continue
+            if (has_main or has_sc) and name in paths_of and declared_above(name, name, fn) \
+                    and fn not in reach_calls(name):
+                # declared above its call, and only in a function main() never runs: compiles without the body
+                # (the official compiler; a third adversarial pass)
+                cleared.add(fn)
                 continue
             if unread:
                 issues.append(dict(severity="info", category="missing_include", node=nid, label=g.label(nid),
@@ -1577,13 +1793,26 @@ def run_analysis(out_dir, verbose=True):
                 issues.append(dict(severity="error", category="missing_include", node=nid, label=g.label(nid),
                                    detail=f"calls {fn}() which is defined in '{lib}' but does not #include it "
                                           f"(will not compile unless the function exists elsewhere).{ncs_note}"))
+        if via_users:
+            # it compiles - each script that includes it includes the defining library first - but it leans on them:
+            # one note per library, not per call, so the Issues page isn't flooded (a tester: "kinda false positive,
+            # but I guess it is true that it is a bad practice"; another's AI library had 545 such calls)
+            libs_ = sorted(via_users)
+            n_fn = sum(len(v_) for v_ in via_users.values())
+            issues.append(dict(severity="info", category="include_via_users", node=nid, label=g.label(nid),
+                               detail=f"uses {n_fn} function(s) from {len(libs_)} library(ies) it does not #include: "
+                                      + "; ".join(f"'{l_}' ({', '.join(f'{f_}()' for f_ in sorted(via_users[l_])[:5])}"
+                                                  + (" ..." if len(via_users[l_]) > 5 else "") + ")"
+                                                  for l_ in libs_[:5]) + (" ..." if len(libs_) > 5 else "")
+                                      + " - it compiles because every script that includes it includes those first"))
         triggers = [(k, g.label(s), v) for s, k, v in g.rev.get(nid, [])
                     if k in ("event_script", "module_event", "dlg_script", "execute_script", "tag_based_script")]
         inc_users = sum(1 for s, k, v in g.rev.get(nid, []) if k == "include")
         d = nwn_describe.describe_script(name, has_main, has_sc, header, calls, lits_by_script[name],
                                          triggers, inc_users, sorted(dyn_by_script[name]), lib_calls,
                                          [f for f in (defined or "").split(",") if f],
-                                         missing_inc=[f"{fn}() from '{lib}' (NOT included)" for fn, lib in missing_inc])
+                                         missing_inc=[f"{fn}() from '{lib}' (NOT included)" for fn, lib in missing_inc
+                                                      if fn not in cleared])
         scripts.append(dict(node=nid, name=name, role=d["role"], summary=d["summary"], details=d["details"],
                             description=descriptions_override.get(name), lines=lines,
                             compiled=bool(has_ncs) or (nasher and bool(has_main or has_sc)),
@@ -2712,7 +2941,7 @@ def run_analysis(out_dir, verbose=True):
                   # held when analysed, so the page can tell "loaded since - Analyse again"
                   db_named=[dict(node=k, label=g.label(k)) for k in db_named[:5000]], db_named_count=len(db_named),
                   db_words=len(db_words), db_words_sig=words_signature(db_words),
-                  same_stats_rules=1, runtime_tag_rules=1, locstring_rules=locstring_rules, locstring_counts=locstring_counts,
+                  same_stats_rules=1, runtime_tag_rules=1, library_include_rules=2, locstring_rules=locstring_rules, locstring_counts=locstring_counts,
                   map_summary=map_summary,
                   asset_duplicates=asset_dups, deletions=deletions, areas=areas, conversations=convs, conversation_dynamic_starts=dyn_starts[:300], quests=quests,
                   inferred_quests=inferred, var_audit=var_audit, pw_performance=pw_perf, factions=factions, databases=databases,
@@ -2734,6 +2963,10 @@ def run_analysis(out_dir, verbose=True):
     report["toolkit"] = nwn_update.report_stamp()   # which version made this analysis (Overview; "analyse again" notice)
     with open(os.path.join(out_dir, "report.json"), "w", encoding="utf-8") as fh:
         json.dump(report, fh, ensure_ascii=False)
+    # every library finding's full list of scripts lacking the include (report.json keeps LACKING_MAX of them): the
+    # build audit compares whole lists, so a script the build breaks can't hide past the cut (a third adversarial pass)
+    with open(os.path.join(out_dir, LACKING_FILE), "w", encoding="utf-8") as fh:
+        json.dump(lacking_full, fh)
 
     def add_late_issues(extra):
         """Add issues found after report.json was first written (the catalogue's, the palette's): fixes, the

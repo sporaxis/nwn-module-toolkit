@@ -46,7 +46,7 @@ import nwnlib
 ZIP = "analysis_archive.zip"
 STUB = "archive.json"            # left in the analysis folder while it is packed: what was packed and the zip's SHA-256
 # Only what an analysis run regenerates is packed; these names are also the allow-list for unpacking.
-PACK_FILES = ("index.sqlite", "report.json", "catalog.json", "compile.json", "palette.json")
+PACK_FILES = ("index.sqlite", "report.json", "library_lacking.json", "catalog.json", "compile.json", "palette.json")
 PACK_DIRS = ("json", "conversations", "reports")
 BLOCKERS = (".incomplete", "index.state")   # markers of an unfinished or checkpointed analysis run
 

@@ -549,7 +549,20 @@ the thing it is about.
   the source (**Show compiled code**, see 5.3), check that the source is the version you want, then recompile.
 
 Scripts nothing runs get notes instead. A script whose include can't be read (a base-game include without the NWN
-install folder set, or a missing hak) is not judged. The check compares text only (see 15). Text written with `\x`
+install folder set, or a missing hak) is not judged. The check compares text only (see 15). Text that any copy of the
+script or of its includes holds - the module's or a hak's, not an override folder's - is a note saying the `.ncs` was
+compiled with that other copy, not a stale warning. When an include was read from the base game, **How to fix** names
+it: a script package that replaces base-game includes (PRC's `x2_inc_spellhook`, for one) compiles against its own
+copy - list its include hak in the module, or add the folder of its sources under Overview > **Server override
+folders**, then **Analyse again**. An include library that calls a function another library defines
+is judged by the scripts that compile with it: each must have the function declared or defined above the library's
+call - the defining library included before it, or a prototype (`int Fn();`) earlier in the script - because the
+compiler pastes includes in order; those that don't are named. A function that is only declared also needs its
+definition somewhere when the script's `main()` can run it. A library that compiles only because every script that
+includes it includes its libraries first gets one note (`include_via_users`, info) naming them - nothing is broken, but
+a new script that includes only it would not compile. The copy judged is the one players get (hak or module, not
+an override folder's), and which library the finding names doesn't matter to "Accept" ticks or the build audit.
+Text written with `\x`
 escapes (`"\x20\x8E\xFF"`, as colour tables are) and text from includes several levels into the base game's own
 includes are taken into account.
 

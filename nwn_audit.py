@@ -608,6 +608,15 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
         d = re.sub(r"[;,]?\s*used by .*$", "", i["detail"])
         if back_re:                     # a rebuilt hak has a new name - it is still the same hak
             d = back_re.sub(lambda m: back[m.group(1).lower()], d)
+        if i["category"] == "include_cycle":
+            # one cycle, whichever member it is reported on and where its text starts (1.5.10 and earlier reported it
+            # on the member the walk happened to start from): judged by its members
+            m_ = re.match(r"#include cycle: (.*?) \(", i["detail"] or "")
+            return (i["category"], "*", " ".join(sorted(set(m_.group(1).split(" -> ")))) if m_ else d)
+        if i["category"] == "missing_include":
+            # "calls Fn()" is the finding; which definer the text names can change (one of several deleted, an
+            # original analysed by an older version) - masked as in accepted issues (nwn_sheets.mask_libs)
+            d = re.sub(r"'[^']*'(?: or '[^']*')*", "'*'", d) if d.startswith("calls ") else d
         if i["category"] in WORDING_ONLY:
             # whether it is there matters, not its wording: an original analysed by an earlier version has older text
             d = "*"
@@ -641,6 +650,27 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
             o_counts[(i["category"], i["node"])] += count_of(i)
     # the best (lowest) severity each signature had in the original: the same finding that was a note there and is a
     # warning or error now is new (an edit removing the script that gave a tag at run time; second adversarial pass)
+    # a library's missing include names the scripts that lack it (`lacking`): the same finding is new when a script
+    # joined that list (an edit that breaks a script that compiled - the text alone would not change; an adversarial probe)
+    # (the list keeps at most nwn_analysis.LACKING_MAX names; lacking_count has them all, so a count that grew is new too)
+    # library_lacking.json beside each report holds the whole lists (the report keeps the first 200): used when present
+    def _full_lists(folder):
+        try:
+            d_ = json.load(open(os.path.join(folder, "library_lacking.json"), encoding="utf-8"))
+            return d_ if isinstance(d_, dict) else {}
+        except (OSError, ValueError):
+            return {}
+    o_full, c_full = _full_lists(orig_dir), _full_lists(clean_dir)
+
+    def lacking_of(i, full):
+        """The issue's whole `lacking` list when the side file has it, else the (capped) list in the report."""
+        got = full.get(i.get("lacking_key") or "")
+        return got if isinstance(got, list) else i["lacking"]
+    o_lacking, o_lack_n = {}, defaultdict(int)
+    for i in o_rep["issues"]:
+        if i["category"] == "missing_include" and isinstance(i.get("lacking"), list):
+            o_lacking.setdefault(sig(i), set()).update(lacking_of(i, o_full))
+            o_lack_n[sig(i)] = max(o_lack_n[sig(i)], int(i.get("lacking_count") or len(i["lacking"])))
     rank = {"info": 0, "warning": 1, "error": 2}
     o_best = {}
     for i in o_rep["issues"]:
@@ -661,6 +691,10 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
             return not set(s_[2].split(" | ")) <= o_places[i["node"]]
         if s_ in o_best and o_best[s_] < rank.get(i.get("was") or i["severity"], 1):
             return True                  # the same finding, but worse than in the original
+        if s_ in o_lacking and isinstance(i.get("lacking"), list) and (
+                set(lacking_of(i, c_full)) - o_lacking[s_]
+                or int(i.get("lacking_count") or len(i["lacking"])) > o_lack_n[s_]):
+            return True                  # the same library finding, with a script that wasn't lacking before
         return s_ not in o_sig
     # "was": a severity the analysis lowered only because something wasn't loaded (nwn_analysis.include_notes - a hak the
     # module lists not found); the audit's analysis of the clean module has the same gap, so it judges the original one
@@ -670,6 +704,12 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
     # (any severity: a new script nothing uses yet has its "not compiled" lowered to info, but still needs compiling)
     uncompiled_edits = [i for i in c_rep["issues"] if i["category"] == "not_compiled" and i["node"] in edited_scripts]
     new_issues = [i for i in new_issues if i not in uncompiled_edits]
+    # an original analysed before 1.5.11 never judged a library's include order by the scripts that compile with it,
+    # or reported prototypes that way: such findings may be in the original module too, so they are a warning to
+    # analyse the original again, not proof the build broke something (a third adversarial pass: a no-op build FAILed)
+    predates = [] if (o_rep.get("library_include_rules") or 0) >= 2 else [
+        i for i in new_issues if i["category"] in ("missing_include", "include_cycle", "include_via_users")]
+    new_issues = [i for i in new_issues if i not in predates]
     new_errors = [i for i in new_issues if sev(i) == "error"]
     # an edited script whose .ncs was carried over from the original: the game runs the OLD compiled code
     compiled_now = {c.lower() for c in changes.get("compiled", [])}
@@ -698,10 +738,12 @@ def audit(orig_dir, build_dir, name, compiler=None, nwn_root=None, nwn_user=None
               "An include is copied into every script that uses it when that script is compiled, so editing an include "
               "changes nothing in game until all of them are recompiled.")
     check("references", "No new broken references or validation errors",
-          "FAIL" if new_errors else ("WARN" if new_issues else "PASS"),
-          [f"NEW {i['severity']}: {i.get('label') or i['node']}: {i['detail']}" for i in new_issues] or
-          [f"clean module issues: {_counts_sentence(c_rep['summary']['issues'])} (original: "
-           f"{_counts_sentence(o_rep['summary']['issues'])})"],
+          "FAIL" if new_errors else ("WARN" if new_issues or predates else "PASS"),
+          ([f"NEW {i['severity']}: {i.get('label') or i['node']}: {i['detail']}" for i in new_issues] or
+           [f"clean module issues: {_counts_sentence(c_rep['summary']['issues'])} (original: "
+            f"{_counts_sentence(o_rep['summary']['issues'])})"]) +
+          [f"not compared - the original was analysed by an older version (Overview -> Analyse again, then build "
+           f"again): {i['severity']}: {i.get('label') or i['node']}: {i['detail']}" for i in predates],
           "Full validation re-run on the clean module and compared with the original.")
 
     # 6 areas / placed objects - proves every kept area keeps its listing in module.ifo and its object counts per type.

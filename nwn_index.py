@@ -1948,24 +1948,35 @@ class Indexer:
         seen_cycles = set()
         # depth-first search with an explicit stack (no recursion limit on deep include chains); a step to a
         # script already on the current path closes a cycle. Each cycle is reported once (keyed by its members).
-        for start in inc:
-            stack, path = [(start, iter(inc[start]))], [start]
+        # A script whose includes were all explored (done) is not walked again: walking every path made a dense
+        # include graph exponential (26 libraries each including all below it: 18 s, 350 never finished - an
+        # adversarial probe); every cycle still closes on some step, so each is still found.
+        done = set()
+        for start in sorted(inc):
+            if start in done:
+                continue
+            stack, path = [(start, iter(sorted(inc[start])))], [start]
             onpath = {start}
             while stack:
                 node, it = stack[-1]
                 nxt = next(it, None)
                 if nxt is None:
-                    stack.pop(); onpath.discard(path.pop()); continue
+                    stack.pop(); done.add(path[-1]); onpath.discard(path.pop()); continue
                 if nxt in onpath:
-                    cyc = path[path.index(nxt):] + [nxt]
+                    cyc = path[path.index(nxt):]
                     key = frozenset(cyc)
                     if key not in seen_cycles:
                         seen_cycles.add(key)
-                        self.issue("error", "include_cycle", start,
+                        # reported on its alphabetically first member, written from there round, so the same cycle
+                        # reads the same whatever the walk order (the build audit also compares cycles by members)
+                        k0 = cyc.index(min(cyc))
+                        cyc = cyc[k0:] + cyc[:k0]
+                        cyc.append(cyc[0])
+                        self.issue("error", "include_cycle", cyc[0],
                                    "#include cycle: " + " -> ".join(c[7:] for c in cyc) +
                                    " (the compiler will fail with duplicate definitions)")
-                elif nxt in inc and nxt not in onpath:
-                    stack.append((nxt, iter(inc[nxt]))); path.append(nxt); onpath.add(nxt)
+                elif nxt in inc and nxt not in onpath and nxt not in done:
+                    stack.append((nxt, iter(sorted(inc[nxt])))); path.append(nxt); onpath.add(nxt)
         scripts = {r[0]: (r[1], r[2], r[3]) for r in
                    self.db.execute("SELECT name, has_main, has_sc, has_ncs FROM scripts")}
         # an area is its .are (size, tiles, events) plus .git (objects) and .gic (comments): a .git or .gic whose .are

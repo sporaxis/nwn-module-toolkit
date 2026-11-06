@@ -34,18 +34,33 @@ def issue_key(i):
     return f"{i['category']}|{i['node']}|{i['label']}"
 
 
+# A missing include names the library that defines the function ("calls Fn() which is defined in 'lib_a' ..."). Which
+# library is named can change without the finding changing - the first of several definers was deleted by a build, or
+# a newer toolkit names include libraries before scripts with a main() - so its quoted names are masked in every
+# signature (accepted issues, the build audit, the Issues page's issueSig): the finding is "calls Fn()" (second
+# adversarial pass on 1.5.11: a Safe deletion of one definer failed the audit and lost the owner's ticks).
+_LIB_NAMES = re.compile(r"'[^']*'(?: or '[^']*')*")
+
+
+def mask_libs(text):
+    """text with the quoted library names of a missing-include detail ("calls Fn() ...") replaced by '*'; any other
+    text unchanged. Never raises."""
+    t = str(text or "")
+    return _LIB_NAMES.sub("'*'", t) if t.startswith("calls ") else t
+
+
 def issue_sig(detail):
     """The issue's detail with every number masked, up to "; used by " when it has one: an accepted issue counts again
     only if its text changes in another way after a re-analysis (the Issues page and nwn_facts use the same rule).
     The list of users is left out so that accepting a missing script covers every object that names it, including
     ones added later (a tester leaves OnConversation names a script that doesn't exist on purpose, on dozens of NPCs).
     A stored signature is cut the same way, so ones saved before this rule still match (sig_matches)."""
-    return re.sub(r"\d+", "#", str(detail or "").split("; used by ")[0])
+    return re.sub(r"\d+", "#", mask_libs(str(detail or "").split("; used by ")[0]))
 
 
 def sig_matches(stored, detail):
     """Does an accepted issue's stored signature still match this detail? (older signatures held the whole text)"""
-    return str(stored or "").split("; used by ")[0] == issue_sig(detail)
+    return mask_libs(str(stored or "").split("; used by ")[0]) == issue_sig(detail)
 
 
 # One accepted_issues.json entry per key (category|node|label). One script or object can carry several issues of one
@@ -60,7 +75,7 @@ SIG_MAX = 4000      # characters of a signature that are stored and compared (a 
 def _cut(sig):
     """A stored signature cut at "; used by ", as issue_sig cuts a detail (older signatures held the whole text), and
     to SIG_MAX characters - the length stored - so storing, matching and un-accepting all compare the same text."""
-    return str(sig).split("; used by ")[0][:SIG_MAX]
+    return mask_libs(str(sig).split("; used by ")[0])[:SIG_MAX]
 
 
 def sigs_of(entry):

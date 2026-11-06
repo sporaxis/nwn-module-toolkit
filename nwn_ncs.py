@@ -39,6 +39,7 @@ import os
 import re
 import struct
 import subprocess
+from collections import defaultdict
 
 import nwnlib
 
@@ -242,7 +243,7 @@ def source_literals(texts, base=(), cache=None):
         flags |= got[1]
         lits |= got[2]                                     # identifiers: only non-empty when __FUNCTION__ is used
     if "__FILE__" in flags:
-        lits.update(f"{x}.nss" for x in texts)
+        lits.update(f"{x.split(chr(0))[0]}.nss" for x in texts)     # "name\0copyN" keys: another copy, same file name
     date, time_ = "__DATE__" in flags, "__TIME__" in flags
     if date:
         lits.add(_DATE_MARK)
@@ -272,12 +273,12 @@ def check_module(db, module_path=None, nwscript_text="", nwn_root=None, live=Non
     game include with no nwn_root, or a hak not found) the literals it would add are unknown, so the script would
     look stale for the wrong reason - it is counted in stats["not_compared"] instead.
 
-    stats: checked (all .ncs read), compared (stale check ran), damaged, stale, not_compared."""
+    stats: checked (all .ncs read), compared (stale check ran), damaged, stale, not_compared, other_copy (compiled from another module/hak copy: a note)."""
     import nwnlib as n
     if module_path is None:
         row = db.execute("SELECT path FROM sources WHERE kind='module' LIMIT 1").fetchone()
         module_path = row[0] if row else None
-    stats = dict(checked=0, compared=0, damaged=0, stale=0, not_compared=0)
+    stats = dict(checked=0, compared=0, damaged=0, stale=0, not_compared=0, other_copy=0)
     if not module_path or not os.path.exists(module_path):
         return [], stats
 
@@ -285,10 +286,21 @@ def check_module(db, module_path=None, nwscript_text="", nwn_root=None, live=Non
     # listed hak's, then the module's, then the override's (nwnlib.source_rank). Rows come in that order and the
     # first copy of a name is kept.
     sources = {}
-    for name, src in db.execute("SELECT sc.name, sc.source FROM scripts sc JOIN files f ON f.id=sc.file_id "
-                                "JOIN sources s ON s.id=f.source_id WHERE sc.source IS NOT NULL "
-                                f"ORDER BY {n.source_rank_sql()}, s.id"):
-        sources.setdefault(name.lower(), src)
+    # the other module/hak copies of a name: the .ncs may have been compiled from the module's own copy of the
+    # script, or against another copy of an include (a compiler set up with other folders than the game's load
+    # order). Text only such a copy holds is a note saying so (a tester's module: 3 PRC scripts whose include copies
+    # differ); text no copy holds is stale
+    other_copies = defaultdict(list)
+    for name, src, kind in db.execute("SELECT sc.name, sc.source, s.kind FROM scripts sc JOIN files f ON "
+                                      "f.id=sc.file_id JOIN sources s ON s.id=f.source_id WHERE sc.source IS NOT NULL "
+                                      f"ORDER BY {n.source_rank_sql()}, s.id"):
+        if name.lower() in sources:
+            # module and hak copies only: an override folder's copy is the builder's or a server's, not what was
+            # shipped - an old one lying there must not excuse a stale .ncs (and the build audit reads no override)
+            if src != sources[name.lower()] and kind in ("module", "hak"):
+                other_copies[name.lower()].append(src)
+        else:
+            sources[name.lower()] = src
     indexed = set(sources)                                 # scripts the index read (their #includes are edges)
     includes = {}                                          # script -> scripts it #includes directly
     for src, dst in db.execute("SELECT src, dst FROM edges WHERE kind='include'"):
@@ -369,19 +381,51 @@ def check_module(db, module_path=None, nwscript_text="", nwn_root=None, live=Non
             lits, normalise = source_literals(texts, base_lits, literal_cache)
             memo = {}
             unexplained = sorted({s for s in result["strings"] if s and not _explained(normalise(s), lits, memo)})
+            if unexplained and any(other_copies.get(x) for x in closure):
+                # text the copies the game loads don't have: does another module/hak copy have it? (see `other_copies`)
+                all_texts = dict(texts)
+                for x in closure:
+                    for k_, t_ in enumerate(other_copies.get(x, ())):
+                        all_texts[f"{x}\0copy{k_}"] = t_
+                lits2, norm2 = source_literals(all_texts, base_lits, literal_cache)
+                memo2 = {}
+                if not [s for s in unexplained if not _explained(norm2(s), lits2, memo2)]:
+                    stats["other_copy"] += 1
+                    copies_ = sorted(x for x in closure if other_copies.get(x))
+                    issues.append(dict(severity="info", category="ncs_stale", node=f"script:{name}",
+                                       label=f"{name}.ncs",
+                                       detail=f"the compiled script matches another copy of its source or includes "
+                                              f"({', '.join(copies_[:3])}: the module's and a hak's differ), not the "
+                                              f"copy the game loads first - it was compiled with the other one"
+                                              f"{unused_note}",
+                                       fix="If that is the copy you meant, nothing to do. Otherwise remove the "
+                                           "outdated copy (or make both the same) and compile again, so the source "
+                                           "you read is the source that runs."))
+                    continue
             if unexplained:
                 stats["stale"] += 1
                 shown = ", ".join(repr(s[:40]) for s in unexplained[:4])
                 more = " ..." if len(unexplained) > 4 else ""
+                # includes read from the base game here: a build that compiles with its own copies of them (PRC's
+                # x2_inc_spellhook in its include hak or a folder of sources) gives text the game's copy lacks - a
+                # tester's 3 PRC scripts, compiled minutes before the analysis. Said in the fix, not the detail, so
+                # earlier "by design" ticks and the build audit still match.
+                from_game = sorted(x for x in closure if x not in indexed)
+                game_note = ("" if not from_game else
+                             f"This analysis read {', '.join(from_game[:4])}{' ...' if len(from_game) > 4 else ''} "
+                             "from the base game. If you compile with your own copies of those includes (a script "
+                             "package's include hak such as PRC's, or a folder of its sources), the .ncs is right: list "
+                             "that hak in the module, or add the folder under Overview > Server override folders, and "
+                             "Analyse again - or accept this as by design. ")
                 issues.append(dict(severity="warning" if used else "info", category="ncs_stale",
                                    node=f"script:{name}", label=f"{name}.ncs",
                                    detail=f"the compiled script contains text its source (and includes) no longer has: "
                                           f"{shown}{more} - it was compiled from a different version of the source, and "
                                           f"the game runs the compiled version{unused_note}",
-                                   fix="Compare first: Script panel > Compiled code shows what the game runs now. "
-                                       "If that text is old, recompile the script; if it is right, the .ncs may have "
-                                       "been compiled against a hak or a nwscript.nss this analysis didn't load - "
-                                       "then leave it."))
+                                   fix=game_note + "Compare first: Script panel > Compiled code shows what the "
+                                       "game runs now. If that text is old, recompile the script; if it is right, the "
+                                       ".ncs may have been compiled against a hak or a nwscript.nss this analysis "
+                                       "didn't load - then leave it."))
     finally:
         if erf:
             erf.close()

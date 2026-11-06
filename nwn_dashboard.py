@@ -454,7 +454,7 @@ ARCHIVING = set()            # analyses being zipped/unzipped: nothing may open 
 INCOMPLETE = ".incomplete"   # marker: an analysis was started here and has not finished (nwn_analyse.py owns it)
 # Files an analysis run generates - Clear/Delete remove these. Everything else is kept unless you tick it.
 DATA_FILES = ("index.sqlite", "index.sqlite-journal", "index.sqlite-wal", "index.sqlite-shm", "index.state",
-              "index.state.tmp", "index.done", "report.json", "catalog.json", "compile.json", "palette.json",
+              "index.state.tmp", "index.done", "report.json", "library_lacking.json", "catalog.json", "compile.json", "palette.json",
               "palette.json.tmp", INCOMPLETE,
               nwn_progress.RUN_LOCK, "analysis_archive.zip", "analysis_archive.zip.tmp", "archive.json")
 DATA_DIRS = ("json", "conversations", "reports", ".unpack_tmp", "maps", "maps.tmp", "maps.old", nwn_index.TLK_INSIDE)

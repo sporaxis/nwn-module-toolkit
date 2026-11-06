@@ -86,6 +86,12 @@ def _missing_include(i):
         return ("Nothing to do: the library declares the function and leaves the body to the script that includes it "
                 "(HCR and similar packages work this way). Only if a script that includes this one fails to compile, add "
                 f"#include \"{lib.group(1) if lib else '<the include>'}\" to THAT script.")
+    if "script(s) that include this library" in d:
+        return (f"In each script named, add #include \"{lib.group(1) if lib else '<the include>'}\" before the line that "
+                "includes this library (or include it in this library itself), then compile them.")
+    if "no script that compiles includes this library" in d:
+        return ("Nothing to do now. When a script starts using this library, include "
+                f"\"{lib.group(1) if lib else '<the include>'}\" in it too (before this library).")
     # severity "info" is the variant where an unread (base game / hak) include might define the function
     if i.get("severity") == "info":
         return ("Nothing to do unless the script fails to compile: the function may come from the base-game or hak "
@@ -258,6 +264,10 @@ FIXES = {
                                "and use Validate) - until then the game runs no/old code for it."),
     "parse_error": lambda i: "Open the file in the toolset and re-save it; if it still fails, it is damaged - restore it from a backup.",
     "include_cycle": lambda i: "Remove one #include from the loop (includes must not include each other).",
+    "include_via_users": lambda i: ("Nothing is broken: every script that includes this library includes the "
+                                    "libraries named first. To let it stand on its own (a new script that includes "
+                                    "only it would not compile), add those #include lines at its top - or accept "
+                                    "this as by design."),
     "orphan_library": lambda i: ("Nothing uses it: keep it if a hak or future script needs it, otherwise it can go "
                                  "(see Safe to delete)."),
     "resource_conflict": lambda i: ("Several sources provide this resource - the game uses the first in load order "
